@@ -23,6 +23,7 @@
 #include "pg_lake/util/s3_reader_utils.h"
 
 #include "nodes/pg_list.h"
+#include "utils/array.h"
 #include "utils/hsearch.h"
 
 #define DATA_FILES_TABLE_QUALIFIED \
@@ -36,20 +37,17 @@ typedef struct TableDataFileHashEntry
 }			TableDataFileHashEntry;
 
 
-/* external control of whether to add to in-transaction temp table */
-typedef bool (*PgLakeAddDataFileHookType) (void);
-extern PGDLLEXPORT PgLakeAddDataFileHookType PgLakeAddDataFileHook;
-
-
 /* functions to read from files catalog */
-extern PGDLLEXPORT List *GetTableDataFilesFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
+extern PGDLLEXPORT List *GetTableDataFilesFromCatalog(Oid relationId, bool dataOnly,
 													  bool forUpdate, char *orderBy, Snapshot snapshot);
-HTAB	   *GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
+HTAB	   *GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly,
 											 bool forUpdate, char *orderBy, Snapshot snapshot,
-											 List *partitionTransforms, bool skipColumnStats);
-HTAB	   *GetTableDataFilesByPathHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
+											 List *partitionTransforms, bool skipColumnStats,
+											 ArrayType *fileIdFilter);
+HTAB	   *GetTableDataFilesByPathHashFromCatalog(Oid relationId, bool dataOnly,
 												   bool forUpdate, char *orderBy, Snapshot snapshot,
-												   List *partitionTransforms, bool skipColumnStats);
+												   List *partitionTransforms, bool skipColumnStats,
+												   ArrayType *fileIdFilter);
 extern PGDLLEXPORT void LoadColumnStatsForFiles(Oid relationId, HTAB *filesByPath,
 												List *dataFiles);
 extern PGDLLEXPORT List *GetPossiblePositionDeleteFilesFromCatalog(Oid relationId, List *sourcePathList,

@@ -1324,10 +1324,9 @@ GetPartitionWithMostEligibleFiles(Oid relationId, TimestampTz compactionStartTim
 
 	Snapshot	snapshot = NULL;
 	bool		dataOnly = false;
-	bool		newFilesOnly = false;
 
 	/* fetch all data files from catalog */
-	List	   *dataFiles = GetTableDataFilesFromCatalog(relationId, dataOnly, newFilesOnly,
+	List	   *dataFiles = GetTableDataFilesFromCatalog(relationId, dataOnly,
 														 forUpdate, orderBy, snapshot);
 
 	/* group data files by partition spec and partition tuple */

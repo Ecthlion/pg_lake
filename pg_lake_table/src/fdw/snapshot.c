@@ -199,9 +199,8 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 		 * using the same snapshot.
 		 */
 		bool		dataOnly = true;
-		bool		newFilesOnly = false;
 		List	   *dataFiles =
-			GetTableDataFilesFromCatalog(relationId, dataOnly, newFilesOnly,
+			GetTableDataFilesFromCatalog(relationId, dataOnly,
 										 isResultRelation, NULL, snapshot);
 
 		/* prune the data files based on the filters in the query execution */

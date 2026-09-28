@@ -279,6 +279,22 @@ def test_every_write_shape_lands_in_metadata(
         pg_conn, s3, TEST_TABLE_NAMESPACE, table_name
     )
 
+    # a file added in a released (committed) subtransaction must survive the
+    # rollback of a later sibling subtransaction at the same nesting depth.
+    # Tracking the added file id by subtransaction id rather than nesting
+    # depth is what keeps the sibling's rollback from also discarding it.
+    run_command("SAVEPOINT s2", pg_conn)
+    run_command(f"INSERT INTO {qualified_name} VALUES (105)", pg_conn)
+    run_command("RELEASE SAVEPOINT s2", pg_conn)
+    run_command("SAVEPOINT s3", pg_conn)
+    run_command(f"INSERT INTO {qualified_name} VALUES (998)", pg_conn)
+    run_command("ROLLBACK TO SAVEPOINT s3", pg_conn)
+    run_command(f"INSERT INTO {qualified_name} VALUES (106)", pg_conn)
+    pg_conn.commit()
+    assert_iceberg_metadata_matches_storage(
+        pg_conn, s3, TEST_TABLE_NAMESPACE, table_name
+    )
+
     # update, which removes and adds
     run_command(f"UPDATE {qualified_name} SET id = id + 1000 WHERE id > 100", pg_conn)
     pg_conn.commit()
@@ -286,9 +302,15 @@ def test_every_write_shape_lands_in_metadata(
         pg_conn, s3, TEST_TABLE_NAMESPACE, table_name
     )
 
-    assert run_query(f"SELECT count(*) FROM {qualified_name}", pg_conn)[0][0] == 103
+    assert run_query(f"SELECT count(*) FROM {qualified_name}", pg_conn)[0][0] == 105
     assert (
         run_query(f"SELECT count(*) FROM {qualified_name} WHERE id = 999", pg_conn)[0][
+            0
+        ]
+        == 0
+    )
+    assert (
+        run_query(f"SELECT count(*) FROM {qualified_name} WHERE id = 998", pg_conn)[0][
             0
         ]
         == 0

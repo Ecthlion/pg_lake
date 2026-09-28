@@ -16,24 +16,14 @@
  */
 
 /*
- * Test extension that exposes hooks/helpers used to exercise narrow
- * temp-object-creation sites under SPI_START_EXTENSION_OWNER.
- *
- * 1. Registers a PgLakeAddDataFileHook returning true.  pg_lake_table
- *    calls this hook on each newly-added data file; when the hook is set
- *    and returns true, pg_lake_table records the file ID in a
- *    per-transaction temp table.  That site exercises the
- *    SPI_START_EXTENSION_OWNER_ALLOWING_TEMP_OBJECTS variant in
- *    CreateTxDataFileIdsTempTableIfNotExists.
- *
- * 2. Exposes run_iceberg_dml_under_extension_owner(query text), a SQL
- *    helper that runs an UPDATE/DELETE on an Iceberg foreign table from
- *    inside SPI_START_EXTENSION_OWNER.  pg_lake_table's BeginForeignModify
- *    creates a per-statement temp tracking table for both UPDATE and
- *    DELETE; the temp create must succeed under
- *    SECURITY_RESTRICTED_OPERATION.  Without the narrow restricted-op clear
- *    in CreateUpdateTrackingTable this fails with "cannot create temporary
- *    table within security-restricted operation".
+ * Test extension that exposes run_iceberg_dml_under_extension_owner(query
+ * text), a SQL helper that runs an UPDATE/DELETE on an Iceberg foreign table
+ * from inside SPI_START_EXTENSION_OWNER. pg_lake_table's BeginForeignModify
+ * creates a per-statement temp tracking table for both UPDATE and DELETE;
+ * the temp create must succeed under SECURITY_RESTRICTED_OPERATION. Without
+ * the narrow restricted-op clear in CreateUpdateTrackingTable this fails
+ * with "cannot create temporary table within security-restricted
+ * operation".
  *
  * Used by tests/pytests/test_data_file_hook_temp_table.py.
  */
@@ -42,31 +32,11 @@
 
 #include "pg_extension_base/extension_ids.h"
 #include "pg_extension_base/spi_helpers.h"
-#include "pg_lake/fdw/data_files_catalog.h"
 #include "utils/builtins.h"
 
 PG_MODULE_MAGIC;
 
 extern PGDLLIMPORT CachedExtensionIds * PgLakeTable;
-
-void		_PG_init(void);
-
-static bool AlwaysAddDataFile(void);
-
-
-static bool
-AlwaysAddDataFile(void)
-{
-	return true;
-}
-
-
-void
-_PG_init(void)
-{
-	PgLakeAddDataFileHook = AlwaysAddDataFile;
-}
-
 
 PG_FUNCTION_INFO_V1(run_iceberg_dml_under_extension_owner);
 

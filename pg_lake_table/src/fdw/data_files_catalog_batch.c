@@ -40,6 +40,7 @@
 #include "pg_lake/iceberg/partitioning/partition.h"
 #include "pg_lake/iceberg/partitioning/spec_generation.h"
 #include "pg_lake/partitioning/partition_spec_catalog.h"
+#include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "pg_lake/util/array_utils.h"
 #include "pg_lake/util/path_hash.h"
 
@@ -86,9 +87,7 @@ static void ExecInsertDataFilePartitionValues(Oid relationId,
 											  ArrayType *partitionFieldIdArray,
 											  ArrayType *valueArray);
 static bool AddOpHasPartitionValues(TableMetadataOperation * operation);
-static void BulkInsertTrackedFileIds(List *addOps, HTAB *pathToFileId);
-static void ExecInsertTrackedFileIds(ArrayType *fileIdArray);
-static void CreateTxDataFileIdsTempTableIfNotExists(void);
+static void BulkInsertTrackedFileIds(Oid relationId, List *addOps, HTAB *pathToFileId);
 #ifdef USE_ASSERT_CHECKING
 static void AssertAllOpsAreType(List *ops, TableMetadataOperationType type);
 #endif
@@ -135,9 +134,10 @@ BatchableType(TableMetadataOperationType type)
 
 /*
  * Apply a run of DATA_FILE_ADD ops via bulk INSERTs into the three lake_table
- * catalogs (files, data_file_column_stats, data_file_partition_values) plus
- * the tx-scoped tracked-file-ids temp table. Pays O(catalogs) SPI round
- * trips instead of O(files * (1 + columns + partition_fields)).
+ * catalogs (files, data_file_column_stats, data_file_partition_values), and
+ * tracks the added ids in backend memory for the append-only commit path.
+ * Pays O(catalogs) SPI round trips instead of O(files * (1 + columns +
+ * partition_fields)).
  */
 static void
 FlushDataFileAddBatch(Oid relationId, List *addOps)
@@ -159,7 +159,7 @@ FlushDataFileAddBatch(Oid relationId, List *addOps)
 
 	BulkInsertDataFileColumnStats(relationId, addOps);
 	BulkInsertDataFilePartitionValues(relationId, addOps, pathToFileId);
-	BulkInsertTrackedFileIds(addOps, pathToFileId);
+	BulkInsertTrackedFileIds(relationId, addOps, pathToFileId);
 	hash_destroy(pathToFileId);
 }
 
@@ -600,20 +600,15 @@ AddOpHasPartitionValues(TableMetadataOperation * operation)
 
 
 /*
- * Record the id of every file this batch added into the tx-scoped temp
- * table, regardless of content type. Ids are resolved via pathToFileId
+ * Record the id of every file this batch added, via TrackAddedFileIds
+ * (track_iceberg_metadata_changes.c). Ids are resolved via pathToFileId
  * rather than a JOIN back to lake_table.files.
- *
- * Unconditional: earlier this only ran when a sibling extension opted in
- * via PgLakeAddDataFileHook, which meant the temp table -- and therefore
- * every newFilesOnly read, including the append-only commit path in
- * track_iceberg_metadata_changes.c -- silently saw no rows by default.
  */
 static void
-BulkInsertTrackedFileIds(List *addOps, HTAB *pathToFileId)
+BulkInsertTrackedFileIds(Oid relationId, List *addOps, HTAB *pathToFileId)
 {
 	int			fileCount = list_length(addOps);
-	Datum	   *fileIdDatums = palloc(sizeof(Datum) * fileCount);
+	int64	   *fileIds = palloc(sizeof(int64) * fileCount);
 	int			trackedFileCount = 0;
 	ListCell   *operationCell = NULL;
 
@@ -625,69 +620,12 @@ BulkInsertTrackedFileIds(List *addOps, HTAB *pathToFileId)
 			PathHashSearch(pathToFileId, operation->path, HASH_FIND, NULL);
 
 		Assert(entry != NULL);
-		fileIdDatums[trackedFileCount++] = Int64GetDatum(entry->fileId);
+		fileIds[trackedFileCount++] = entry->fileId;
 	}
 
 	Assert(trackedFileCount == fileCount);
 
-	CreateTxDataFileIdsTempTableIfNotExists();
-
-	ArrayType  *fileIdArray = MakeArrayFromDatums(fileIdDatums, NULL,
-												  trackedFileCount, INT8OID);
-
-	ExecInsertTrackedFileIds(fileIdArray);
-}
-
-
-/* INSERT into the tx-scoped temp table via unnest. */
-static void
-ExecInsertTrackedFileIds(ArrayType *fileIdArray)
-{
-	char	   *query =
-		"INSERT INTO " TX_DATA_FILES_TABLE_NAME " (id) "
-		"SELECT id FROM pg_catalog.unnest($1) AS t(id)";
-
-	DECLARE_SPI_ARGS(1);
-	SPI_ARG_VALUE(1, INT8ARRAYOID, fileIdArray, false);
-
-	SPI_START_EXTENSION_OWNER(PgLakeTable);
-	SPI_EXECUTE(query, /* readOnly = */ false);
-	SPI_END();
-}
-
-
-/*
- * Lazily create the per-tx tracker temp table; rows are auto-dropped at COMMIT.
- *
- * PostgreSQL forbids CREATE TEMP TABLE under SECURITY_RESTRICTED_OPERATION,
- * so we use the SPI_START_EXTENSION_OWNER_ALLOWING_TEMP_OBJECTS variant which
- * omits the restricted-op flag.  The search_path lockdown stays in effect;
- * the DDL is a fixed string with no caller-supplied input.
- *
- * This runs once per session and every write after that hits the IF NOT
- * EXISTS no-op, which would otherwise put a "relation ... already exists,
- * skipping" NOTICE in front of every ordinary INSERT. Drop the message down
- * to WARNING for this one statement, the same way EnsureExtensionIsUpdated
- * quiets ALTER EXTENSION's own notice.
- */
-static void
-CreateTxDataFileIdsTempTableIfNotExists(void)
-{
-	const char *query =
-		"create temporary table if not exists " TX_DATA_FILES_TABLE_NAME " "
-		"(id bigint primary key) USING heap ON COMMIT DELETE ROWS;";
-
-	SPI_START_EXTENSION_OWNER_ALLOWING_TEMP_OBJECTS(PgLakeTable);
-
-	if (client_min_messages == NOTICE)
-	{
-		(void) set_config_option("client_min_messages", "warning",
-								 PGC_USERSET, PGC_S_SESSION,
-								 GUC_ACTION_SAVE, true, 0, false);
-	}
-
-	SPI_execute(query, /* readOnly = */ false, 0);
-	SPI_END();
+	TrackAddedFileIds(relationId, fileIds, trackedFileCount);
 }
 
 

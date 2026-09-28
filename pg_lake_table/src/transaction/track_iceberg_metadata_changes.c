@@ -40,6 +40,7 @@
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "pg_lake/transaction/transaction_hooks.h"
+#include "pg_lake/util/array_utils.h"
 #include "pg_lake/util/injection_points.h"
 #include "pg_lake/json/json_utils.h"
 #include "pg_lake/util/s3_writer_utils.h"
@@ -95,6 +96,7 @@ bool		EnableAppendOnlyCommitFastPath = true;
 
 static void ApplyTrackedIcebergMetadataChanges(bool isVerbose);
 static void RecordIcebergMetadataOperation(Oid relationId, TableMetadataOperationType operationType);
+static TableMetadataOperationTracker * GetOrCreateOperationTracker(Oid relationId);
 static void InitTableMetadataTrackerHashIfNeeded(void);
 static void InitRestCatalogRequestsHashIfNeeded(void);
 static bool ShouldRunCommitTimeAnalyze(HTAB *trackedRelations);
@@ -505,18 +507,7 @@ IdentifierJson(const char *namespaceFlat, const char *tableName)
 static void
 RecordIcebergMetadataOperation(Oid relationId, TableMetadataOperationType operationType)
 {
-	InitTableMetadataTrackerHashIfNeeded();
-
-	bool		isFound = false;
-	TableMetadataOperationTracker *opTracker =
-		hash_search(TrackedIcebergMetadataOperationsHash,
-					&relationId, HASH_ENTER, &isFound);
-
-	if (!isFound)
-	{
-		memset(opTracker, 0, sizeof(TableMetadataOperationTracker));
-		opTracker->relationId = relationId;
-	}
+	TableMetadataOperationTracker *opTracker = GetOrCreateOperationTracker(relationId);
 
 	/*
 	 * flags are not reset in case a subtransaction rollbacks. But this is not
@@ -562,6 +553,179 @@ RecordIcebergMetadataOperation(Oid relationId, TableMetadataOperationType operat
 			/* other operations do not affect the flags */
 			break;
 	}
+}
+
+
+/*
+ * GetOrCreateOperationTracker returns the TableMetadataOperationTracker for
+ * relationId, creating a zeroed one in TopTransactionContext on first use
+ * this transaction.
+ */
+static TableMetadataOperationTracker *
+GetOrCreateOperationTracker(Oid relationId)
+{
+	InitTableMetadataTrackerHashIfNeeded();
+
+	bool		isFound = false;
+	TableMetadataOperationTracker *opTracker =
+		hash_search(TrackedIcebergMetadataOperationsHash,
+					&relationId, HASH_ENTER, &isFound);
+
+	if (!isFound)
+	{
+		memset(opTracker, 0, sizeof(TableMetadataOperationTracker));
+		opTracker->relationId = relationId;
+	}
+
+	return opTracker;
+}
+
+
+/*
+ * Per-entry bookkeeping for TableMetadataOperationTracker.addedFileIds.
+ * subXactId is the subtransaction id the entry currently belongs to; see
+ * TrackAddedFileIds and AddedFileIdsSubXactCallback.
+ */
+typedef struct AddedFileIdEntry
+{
+	int64		fileId;
+	SubTransactionId subXactId;
+}			AddedFileIdEntry;
+
+/*
+ * Caps TableMetadataOperationTracker.addedFileIds per relation. Past this,
+ * TrackAddedFileIds drops the list instead of leaving it partial; a bulk
+ * load that big falls back to the diff for the rest of the transaction (see
+ * addedFileIdsOverflowed).
+ */
+#define MAX_TRACKED_ADDED_FILES 100000
+
+/*
+ * TrackAddedFileIds records the ids of files a DATA_FILE_ADD batch just
+ * inserted into lake_table.files, so the append-only commit path
+ * (GetAddedOnlyDataFileMetadataOperations) can read exactly those files back
+ * instead of diffing the whole table.
+ *
+ * Each entry is tagged with the current subtransaction id.
+ * AddedFileIdsSubXactCallback drops entries from an aborted subtransaction
+ * the same way the rows they name drop out of lake_table.files, and
+ * reassigns entries from a committed (released) subtransaction to its
+ * parent, mirroring the standard subxact-owned-resource pattern other
+ * extensions use for the same purpose (e.g. postgres_fdw's connection
+ * cache).
+ *
+ * Past MAX_TRACKED_ADDED_FILES, the list is dropped instead of left partial:
+ * a partial list would silently under-report a bulk load. GetDataFile-
+ * MetadataOperations checks addedFileIdsOverflowed and falls back to the
+ * diff for the rest of the transaction once that happens.
+ */
+void
+TrackAddedFileIds(Oid relationId, const int64 *fileIds, int fileIdCount)
+{
+	TableMetadataOperationTracker *opTracker = GetOrCreateOperationTracker(relationId);
+
+	if (opTracker->addedFileIdsOverflowed)
+		return;
+
+	SubTransactionId subXactId = GetCurrentSubTransactionId();
+	MemoryContext oldContext = MemoryContextSwitchTo(TopTransactionContext);
+
+	for (int fileIdIndex = 0; fileIdIndex < fileIdCount; fileIdIndex++)
+	{
+		if (list_length(opTracker->addedFileIds) >= MAX_TRACKED_ADDED_FILES)
+		{
+			opTracker->addedFileIdsOverflowed = true;
+			list_free_deep(opTracker->addedFileIds);
+			opTracker->addedFileIds = NIL;
+			break;
+		}
+
+		AddedFileIdEntry *entry = palloc(sizeof(AddedFileIdEntry));
+
+		entry->fileId = fileIds[fileIdIndex];
+		entry->subXactId = subXactId;
+
+		opTracker->addedFileIds = lappend(opTracker->addedFileIds, entry);
+	}
+
+	MemoryContextSwitchTo(oldContext);
+}
+
+
+/*
+ * AddedFileIdsSubXactCallback keeps addedFileIds entries in sync with the
+ * subtransaction that owns them.
+ *
+ * On abort, entries tagged with the aborting subtransaction's id are
+ * dropped, mirroring the rollback of the lake_table.files rows those ids
+ * name. On commit (a released savepoint), entries tagged with the
+ * committing subtransaction's id are reassigned to the parent id instead of
+ * being dropped: the files they name are still in lake_table.files, and
+ * using the subtransaction id (rather than nesting depth) as the tag keeps
+ * a later sibling subtransaction's rollback from mistaking these entries
+ * for its own, since sibling subtransactions can share the same nesting
+ * depth but never share an id.
+ */
+void
+AddedFileIdsSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
+							SubTransactionId parentSubid, void *arg)
+{
+	if ((event != SUBXACT_EVENT_ABORT_SUB && event != SUBXACT_EVENT_COMMIT_SUB) ||
+		TrackedIcebergMetadataOperationsHash == NULL)
+		return;
+
+	/*
+	 * survivingFileIds below is built with lappend() while iterating, and
+	 * CurrentMemoryContext at subxact abort/commit time is not guaranteed to
+	 * outlive this callback (it can be the subtransaction's own context,
+	 * which CleanupSubTransaction frees shortly after). Build the new list in
+	 * TopTransactionContext, the same context TrackAddedFileIds allocates
+	 * addedFileIds in, so opTracker->addedFileIds never ends up pointing at
+	 * freed memory.
+	 */
+	MemoryContext oldContext = MemoryContextSwitchTo(TopTransactionContext);
+
+	HASH_SEQ_STATUS trackerStatus;
+
+	hash_seq_init(&trackerStatus, TrackedIcebergMetadataOperationsHash);
+
+	TableMetadataOperationTracker *opTracker = NULL;
+
+	while ((opTracker = hash_seq_search(&trackerStatus)) != NULL)
+	{
+		if (opTracker->addedFileIdsOverflowed || opTracker->addedFileIds == NIL)
+			continue;
+
+		if (event == SUBXACT_EVENT_ABORT_SUB)
+		{
+			List	   *survivingFileIds = NIL;
+			ListCell   *fileIdCell = NULL;
+
+			foreach(fileIdCell, opTracker->addedFileIds)
+			{
+				AddedFileIdEntry *entry = lfirst(fileIdCell);
+
+				if (entry->subXactId != mySubid)
+					survivingFileIds = lappend(survivingFileIds, entry);
+			}
+
+      opTracker->addedFileIds = survivingFileIds;
+    }
+    else
+    {
+			ListCell   *fileIdCell = NULL;
+
+			foreach(fileIdCell, opTracker->addedFileIds)
+			{
+				AddedFileIdEntry *entry = lfirst(fileIdCell);
+
+				if (entry->subXactId == mySubid)
+					entry->subXactId = parentSubid;
+			}
+		}
+	}
+
+	MemoryContextSwitchTo(oldContext);
 }
 
 
@@ -1426,13 +1590,16 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 {
 	/*
 	 * A transaction that removed no data file does not need the diff below.
-	 * The files it added are the ones the catalog records for this
+	 * The files it added are the ones addedFileIds recorded for this
 	 * transaction, and there is nothing to remove, so the last pushed
-	 * metadata has no answer left to give.
+	 * metadata has no answer left to give. addedFileIdsOverflowed means that
+	 * list was dropped as too large to trust, so the diff runs regardless of
+	 * relationDataFileRemoveSeen.
 	 */
 	if (EnableAppendOnlyCommitFastPath &&
 		!opTracker->relationDataFileRemoveSeen &&
-		!opTracker->relationDataFilesRemoveAllSeen)
+		!opTracker->relationDataFilesRemoveAllSeen &&
+		!opTracker->addedFileIdsOverflowed)
 		return GetAddedOnlyDataFileMetadataOperations(opTracker, allTransforms);
 
 	/*
@@ -1464,14 +1631,13 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 	 * column) just to diff paths.
 	 */
 	bool		dataOnly = false;
-	bool		newFilesOnly = false;
 	bool		forUpdate = false;
 	char	   *orderBy = NULL;
 	Snapshot	snapshot = GetTransactionSnapshot();
 
-	HTAB	   *currentFilesMap = GetTableDataFilesByPathHashFromCatalog(opTracker->relationId, dataOnly, newFilesOnly,
+	HTAB	   *currentFilesMap = GetTableDataFilesByPathHashFromCatalog(opTracker->relationId, dataOnly,
 																		 forUpdate, orderBy, snapshot, allTransforms,
-																		 true /* skipColumnStats */ );
+																		 true /* skipColumnStats */ , NULL /* fileIdFilter */ );
 
 	/*
 	 * Preserve the remove-all operation for a real TRUNCATE. The generic
@@ -1586,10 +1752,11 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
  * table, which is what makes a commit on a table with many files expensive even
  * when the commit only appended one file.
  *
- * Nothing of that is needed to describe an append. The catalog tracks the file
- * ids this transaction added, so reading only those files gives the added set
- * directly, and the removed set is empty by construction. What is left is
- * proportional to the files the transaction wrote.
+ * Nothing of that is needed to describe an append. opTracker->addedFileIds
+ * already holds the ids this transaction added (see TrackAddedFileIds), so
+ * reading only those files gives the added set directly, and the removed set
+ * is empty by construction. What is left is proportional to the files the
+ * transaction wrote.
  */
 static List *
 GetAddedOnlyDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
@@ -1603,6 +1770,21 @@ GetAddedOnlyDataFileMetadataOperations(const TableMetadataOperationTracker * opT
 
 	MemoryContextSwitchTo(catalogContext);
 
+	int			addedFileIdCount = list_length(opTracker->addedFileIds);
+	Datum	   *addedFileIdDatums = palloc(sizeof(Datum) * Max(addedFileIdCount, 1));
+	int			addedFileIdIndex = 0;
+	ListCell   *addedFileIdCell = NULL;
+
+	foreach(addedFileIdCell, opTracker->addedFileIds)
+	{
+		AddedFileIdEntry *entry = lfirst(addedFileIdCell);
+
+		addedFileIdDatums[addedFileIdIndex++] = Int64GetDatum(entry->fileId);
+	}
+
+	ArrayType  *fileIdFilter = MakeArrayFromDatums(addedFileIdDatums, NULL,
+												   addedFileIdCount, INT8OID);
+
 	/*
 	 * Read per-column stats along with the files. The general path defers
 	 * them to a targeted second call because it reads every file of the table
@@ -1610,15 +1792,14 @@ GetAddedOnlyDataFileMetadataOperations(const TableMetadataOperationTracker * opT
 	 * added file, so the first read is already the targeted one.
 	 */
 	bool		dataOnly = false;
-	bool		newFilesOnly = true;
 	bool		forUpdate = false;
 	char	   *orderBy = NULL;
 	Snapshot	snapshot = GetTransactionSnapshot();
 
 	HTAB	   *addedFilesMap =
-		GetTableDataFilesByPathHashFromCatalog(opTracker->relationId, dataOnly, newFilesOnly,
+		GetTableDataFilesByPathHashFromCatalog(opTracker->relationId, dataOnly,
 											   forUpdate, orderBy, snapshot, allTransforms,
-											   false /* skipColumnStats */ );
+											   false /* skipColumnStats */ , fileIdFilter);
 
 	List	   *addedFiles = NIL;
 	HASH_SEQ_STATUS addedFilesStatus;
@@ -1683,15 +1864,14 @@ AssertAddedOnlyOperationsMatchDiff(const TableMetadataOperationTracker * opTrack
 	MemoryContextSwitchTo(diffContext);
 
 	bool		dataOnly = false;
-	bool		newFilesOnly = false;
 	bool		forUpdate = false;
 	char	   *orderBy = NULL;
 	Snapshot	snapshot = GetTransactionSnapshot();
 
 	HTAB	   *currentFilesMap =
-		GetTableDataFilesByPathHashFromCatalog(opTracker->relationId, dataOnly, newFilesOnly,
+		GetTableDataFilesByPathHashFromCatalog(opTracker->relationId, dataOnly,
 											   forUpdate, orderBy, snapshot, allTransforms,
-											   true /* skipColumnStats */ );
+											   true /* skipColumnStats */ , NULL /* fileIdFilter */ );
 
 	List	   *addedFiles = NIL;
 	List	   *removedFilePaths = NIL;

@@ -72,10 +72,6 @@
 #define DELETION_FILE_MAP_TABLE PG_LAKE_TABLE_SCHEMA ".deletion_file_map"
 
 
-/* global hook override */
-PgLakeAddDataFileHookType PgLakeAddDataFileHook = NULL;
-
-
 static void FillDataFileColumnStats(TableDataFile * dataFile, int64 fieldId, int rowIndex);
 static void FillPartitionFieldFromCatalog(TableDataFile * dataFile, List *partitionTransforms,
 										  int64 partitionFieldId, int rowIndex);
@@ -105,16 +101,17 @@ static List *CollectAdjacentOpsOfType(List *operations, ListCell **cursor,
  * It returns the data files that were updated before the given timestamp.
  */
 List *
-GetTableDataFilesFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
+GetTableDataFilesFromCatalog(Oid relationId, bool dataOnly,
 							 bool forUpdate, char *orderBy, Snapshot snapshot)
 {
 	List	   *partitionTransforms = AllPartitionTransformList(relationId);
 
 	HTAB	   *dataFilesHash = GetTableDataFilesHashFromCatalog(relationId, dataOnly,
-																 newFilesOnly, forUpdate,
+																 forUpdate,
 																 orderBy, snapshot,
 																 partitionTransforms,
-																 false /* skipColumnStats */ );
+																 false /* skipColumnStats */ ,
+																 NULL /* fileIdFilter */ );
 
 	List	   *dataFiles = TableDataFileHashToList(dataFilesHash);
 
@@ -128,18 +125,21 @@ GetTableDataFilesFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
  *
  * If dataOnly is true, position deletes are excluded.
  * If forUpdate is true, files are locked with FOR UPDATE.
- * If newFilesOnly is true, only data files that are added in the current transaction are returned.
  * If orderBy is not null, it is used to sort results.
  * If snapshot is set, it is used for the query.
  * If skipColumnStats is true, the per-column min/max stats are not loaded.
  * Callers that only need file-level info (path, id, row count, partition) can
  * pass true to avoid the expensive join against data_file_column_stats; stats
  * can be loaded on demand for a subset of files via LoadColumnStatsForFiles().
+ * If fileIdFilter is not NULL, only files whose id is in the array are
+ * returned; this is how the append-only commit path reads back exactly the
+ * files a transaction added without scanning the rest of the table.
  */
 HTAB *
-GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
+GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly,
 								 bool forUpdate, char *orderBy, Snapshot snapshot,
-								 List *partitionTransforms, bool skipColumnStats)
+								 List *partitionTransforms, bool skipColumnStats,
+								 ArrayType *fileIdFilter)
 {
 	MemoryContext callerContext = CurrentMemoryContext;
 
@@ -186,8 +186,8 @@ GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnl
 	if (dataOnly)
 		appendStringInfo(&metadataQuery, " and content OPERATOR(pg_catalog.=) %d", (int) CONTENT_DATA);
 
-	if (newFilesOnly)
-		appendStringInfoString(&metadataQuery, " and id IN (select id from " TX_DATA_FILES_TABLE_NAME ")");
+	if (fileIdFilter != NULL)
+		appendStringInfoString(&metadataQuery, " and id OPERATOR(pg_catalog.=) ANY($2)");
 
 	if (forUpdate)
 		appendStringInfoString(&metadataQuery, " for update");
@@ -234,8 +234,9 @@ GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnl
 
 	SPI_START_EXTENSION_OWNER(PgLakeTable);
 
-	DECLARE_SPI_ARGS(1);
+	DECLARE_SPI_ARGS(2);
 	SPI_ARG_VALUE(1, OIDOID, relationId, false);
+	SPI_ARG_VALUE(2, INT8ARRAYOID, fileIdFilter, (fileIdFilter == NULL));
 
 	if (!snapshot)
 	{
@@ -383,13 +384,15 @@ GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnl
  * See GetTableDataFilesHashFromCatalog for the meaning of skipColumnStats.
  */
 HTAB *
-GetTableDataFilesByPathHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
+GetTableDataFilesByPathHashFromCatalog(Oid relationId, bool dataOnly,
 									   bool forUpdate, char *orderBy, Snapshot snapshot,
-									   List *partitionTransforms, bool skipColumnStats)
+									   List *partitionTransforms, bool skipColumnStats,
+									   ArrayType *fileIdFilter)
 {
-	HTAB	   *filesById = GetTableDataFilesHashFromCatalog(relationId, dataOnly, newFilesOnly,
+	HTAB	   *filesById = GetTableDataFilesHashFromCatalog(relationId, dataOnly,
 															 forUpdate, orderBy, snapshot,
-															 partitionTransforms, skipColumnStats);
+															 partitionTransforms, skipColumnStats,
+															 fileIdFilter);
 
 	HTAB	   *filesByPath = CreateDataFilesByPathHash();
 

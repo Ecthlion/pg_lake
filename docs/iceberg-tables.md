@@ -175,7 +175,7 @@ $$);
 Because the `DELETE` and `INSERT` run in the same transaction, each row moves exactly once.
 For append-only tables, [pg_incremental](https://github.com/CrunchyData/pg_incremental) is an
 alternative that processes new rows by sequence or time range; see
-[syncing to Snowflake](use-case-snowflake-sync.md) for an example.
+[syncing tables to Iceberg](use-case-iceberg-sync.md) for an example.
 
 ## Making Iceberg the default table format
 

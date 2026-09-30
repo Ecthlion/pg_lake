@@ -11,9 +11,9 @@ End-to-end examples of pg_lake applied to real workloads. Each one can be run as
 pg_lake installation with object storage.
 
 <div class="pglake-cards">
-  <a class="pglake-card" href="{{ '/use-case-snowflake-sync.html' | relative_url }}">
-    <span class="pglake-card-title">Sync Postgres tables to Snowflake</span>
-    <span class="pglake-card-text">Keep an Iceberg copy of operational tables up to date with pg_incremental, and query it from Snowflake without ETL.</span>
+  <a class="pglake-card" href="{{ '/use-case-iceberg-sync.html' | relative_url }}">
+    <span class="pglake-card-title">Sync Postgres tables to Iceberg</span>
+    <span class="pglake-card-text">Keep an Iceberg copy of operational tables up to date with pg_incremental, and query it from any Iceberg engine without ETL.</span>
   </a>
   <a class="pglake-card" href="{{ '/use-case-log-management.html' | relative_url }}">
     <span class="pglake-card-title">Log management</span>

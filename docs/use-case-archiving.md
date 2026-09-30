@@ -165,5 +165,5 @@ You also need to create future heap partitions ahead of time, with a similar job
   simpler to set up, but the `DELETE` leaves dead rows behind for vacuum.
 - **Keep a full copy in Iceberg.** If analytics should see all data, including recent rows,
   sync new rows into Iceberg continuously, as in
-  [syncing to Snowflake](use-case-snowflake-sync.md), and delete old rows from the heap table
+  [syncing tables to Iceberg](use-case-iceberg-sync.md), and delete old rows from the heap table
   once they are in Iceberg. Analytical queries then only read the Iceberg table.

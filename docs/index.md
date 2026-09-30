@@ -69,9 +69,9 @@ SELECT count(*) FROM raw_events JOIN events USING (id);
 ## Use cases
 
 <div class="pglake-cards">
-  <a class="pglake-card" href="{{ '/use-case-snowflake-sync.html' | relative_url }}">
-    <span class="pglake-card-title">Sync Postgres tables to Snowflake</span>
-    <span class="pglake-card-text">Keep an Iceberg copy of operational tables up to date, and query it from Snowflake without ETL.</span>
+  <a class="pglake-card" href="{{ '/use-case-iceberg-sync.html' | relative_url }}">
+    <span class="pglake-card-title">Sync Postgres tables to Iceberg</span>
+    <span class="pglake-card-text">Keep an Iceberg copy of operational tables up to date, and query it from Spark, DuckDB or Snowflake without ETL.</span>
   </a>
   <a class="pglake-card" href="{{ '/use-case-archiving.html' | relative_url }}">
     <span class="pglake-card-title">Archive old data</span>

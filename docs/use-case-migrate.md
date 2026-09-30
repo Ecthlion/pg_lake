@@ -102,5 +102,5 @@ To convert a heap table on the pg_lake server itself, `CREATE TABLE ... AS` is s
 CREATE TABLE orders_iceberg USING iceberg AS SELECT * FROM orders;
 ```
 
-To keep the two in sync afterwards, see [syncing tables](use-case-snowflake-sync.md#sync-new-rows-automatically)
+To keep the two in sync afterwards, see [syncing tables](use-case-iceberg-sync.md#sync-new-rows-automatically)
 and [archiving old data](use-case-archiving.md).

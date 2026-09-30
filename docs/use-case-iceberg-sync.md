@@ -1,16 +1,17 @@
 ---
-title: Sync Postgres tables to Snowflake
+title: Sync Postgres tables to Iceberg
 parent: Use cases
 nav_order: 1
 ---
 
-# Sync Postgres tables to Snowflake with Iceberg
+# Sync Postgres tables to Iceberg
 {: .no_toc }
 
 Applications write to regular PostgreSQL tables, which are fast for transactions but not for
 analytics over months of history. With pg_lake, you can keep an Iceberg copy of those tables in
-object storage, updated automatically from within PostgreSQL, and query it from Snowflake
-without an ETL pipeline or data movement tooling.
+object storage, updated automatically from within PostgreSQL. Any engine that reads Iceberg,
+such as Spark, DuckDB, pyiceberg or Snowflake, can then query the copy in place, without an ETL
+pipeline or data movement tooling.
 
 1. TOC
 {:toc}
@@ -24,9 +25,9 @@ application --> sensor_readings                 heap table in PostgreSQL
                       v
                 sensor_readings_iceberg         Iceberg table in object storage
                       |
-                      |  Iceberg metadata, read through a catalog integration
+                      |  Iceberg metadata, through a catalog or a metadata file
                       v
-                iot_sensors_from_postgres       Iceberg table in Snowflake
+                Spark, DuckDB, pyiceberg, Snowflake, ...
 ```
 
 1. The application keeps writing to a heap table.
@@ -34,17 +35,13 @@ application --> sensor_readings                 heap table in PostgreSQL
    [pg_cron](https://github.com/citusdata/pg_cron), periodically copies new rows into an
    Iceberg table. It first backfills existing rows, then processes each new time range or
    sequence range exactly once.
-3. Snowflake reads the Iceberg table in place through a catalog integration.
-
-The Snowflake developer guide
-[Sync Data from Snowflake Postgres to Snowflake with Iceberg and pg_lake](https://www.snowflake.com/en/developers/guides/sync-data-from-postgres-to-snowflake-with-iceberg-and-pg-lake/)
-walks through the same pattern on Snowflake Postgres. This page also covers self-managed
-pg_lake.
+3. Other engines read the Iceberg table where it is, and PostgreSQL remains the system of
+   record.
 
 ## Prerequisites
 
-- pg_lake, with a `pg_lake_iceberg.default_location_prefix` that Snowflake can reach. On
-  Snowflake Postgres, storage is managed for you.
+- pg_lake, with a `pg_lake_iceberg.default_location_prefix` in a bucket that the other engines
+  can read.
 - pg_cron and pg_incremental. pg_cron must be in `shared_preload_libraries`:
 
   ```ini
@@ -85,16 +82,16 @@ FROM generate_series(1, 5000);
 
 ## Create the Iceberg table
 
-Create an Iceberg table with the same columns. `compatibility_mode = 'snowflake'` stores data in
-a way Snowflake can read in every case, such as `uuid` values nested in arrays:
+Create an Iceberg table with the same columns:
 
 ```sql
-CREATE TABLE sensor_readings_iceberg (LIKE sensor_readings)
-USING iceberg WITH (compatibility_mode = 'snowflake');
+CREATE TABLE sensor_readings_iceberg (LIKE sensor_readings) USING iceberg;
 ```
 
 For large tables, add a [partition spec](iceberg-partitioning.md) such as
-`partition_by = 'month(reading_time)'`, so that both pg_lake and Snowflake can skip old data.
+`partition_by = 'month(reading_time)'`, so that every engine can skip old data. If Snowflake
+will read the table, also add `compatibility_mode = 'snowflake'`, which cannot be changed later
+(see [Snowflake](#snowflake)).
 
 ## Sync new rows automatically
 
@@ -171,11 +168,98 @@ and logs. If rows in the source table change after they are copied, you can:
 
 To monitor or stop a pipeline, see `cron.job_run_details` and `incremental.drop_pipeline`.
 
-## Read the table from Snowflake
+## Read the table from other engines
 
-How Snowflake finds the table depends on where pg_lake runs.
+Other engines can find the Iceberg table in three ways:
 
-### Snowflake Postgres
+- **Through PostgreSQL as the catalog.** pg_lake's catalog has the layout of the Iceberg SQL
+  catalog, so engines that support the Iceberg JDBC or SQL catalog connect to PostgreSQL and
+  always read the latest committed version. See
+  [the PostgreSQL catalog](iceberg-catalogs.md#the-postgresql-catalog).
+- **From a metadata file.** Every commit writes a new metadata file, listed in
+  `iceberg_tables.metadata_location`. Opening that file gives a fixed snapshot of the table.
+- **Through a REST catalog.** If the table is created in a REST catalog such as
+  [Apache Polaris](https://polaris.apache.org/), every engine using that catalog sees each
+  commit. See [REST catalogs](iceberg-catalogs.md#rest-catalogs).
+
+Other engines read the table, and pg_lake writes it. The data stays in one copy in
+object storage, and every engine sees the same, transactionally consistent snapshots.
+
+### Python
+
+[pyiceberg](https://py.iceberg.apache.org/) reads the table through its SQL catalog,
+connected to PostgreSQL. The catalog name must match the database name:
+
+```python
+from pyiceberg.catalog.sql import SqlCatalog
+
+catalog = SqlCatalog(
+    "postgres",
+    uri="postgresql+psycopg2://user:password@dbhost:5432/postgres",
+    warehouse="s3://mybucket/iceberg",
+)
+
+table = catalog.load_table("public.sensor_readings_iceberg")
+df = table.scan(
+    row_filter="device_type == 'hvac'",
+    selected_fields=("reading_time", "temperature"),
+).to_pandas()
+```
+
+Each `load_table` call reads the latest commit, so a script that runs after the pipeline sees
+the new rows.
+
+### Spark
+
+Spark reads the table through the Iceberg JDBC catalog, also connected to PostgreSQL. After
+[configuring the catalog](iceberg-catalogs.md#reading-tables-from-spark):
+
+```sql
+spark-sql (default)> SELECT device_type, avg(temperature)
+                   > FROM postgres.public.sensor_readings_iceberg GROUP BY 1;
+```
+
+### DuckDB
+
+DuckDB's [iceberg extension](https://duckdb.org/docs/stable/core_extensions/iceberg/overview)
+reads the table from its current metadata file. Look it up in PostgreSQL:
+
+```sql
+SELECT metadata_location FROM iceberg_tables WHERE table_name = 'sensor_readings_iceberg';
+```
+
+and query it from DuckDB, with an [S3 secret](https://duckdb.org/docs/stable/core_extensions/httpfs/s3api)
+for the bucket:
+
+```sql
+INSTALL iceberg;
+LOAD iceberg;
+CREATE SECRET (TYPE s3, PROVIDER credential_chain);
+
+SELECT device_type, count(*), round(avg(temperature), 2) AS avg_temp
+FROM iceberg_scan('s3://mybucket/iceberg/postgres/public/sensor_readings_iceberg/20142/metadata/00003-3e0dffb8-5998-4f42-b5af-d59329b2df4c.metadata.json')
+GROUP BY 1 ORDER BY 1;
+```
+
+The metadata file changes on every commit, so look it up again to see newer rows.
+
+### Snowflake
+
+Snowflake reads the table in place, through a catalog integration. Create the table in
+PostgreSQL with `compatibility_mode = 'snowflake'`, which stores data in a way Snowflake can
+read in every case, such as `uuid` values nested in arrays:
+
+```sql
+CREATE TABLE sensor_readings_iceberg (LIKE sensor_readings)
+USING iceberg WITH (compatibility_mode = 'snowflake');
+```
+
+The Snowflake developer guide
+[Sync Data from Snowflake Postgres to Snowflake with Iceberg and pg_lake](https://www.snowflake.com/en/developers/guides/sync-data-from-postgres-to-snowflake-with-iceberg-and-pg-lake/)
+walks through this use case on Snowflake Postgres. How Snowflake finds the table depends on
+where pg_lake runs.
+
+#### Snowflake Postgres
 
 On [Snowflake Postgres](https://docs.snowflake.com/en/user-guide/snowflake-postgres/postgres-pg_lake),
 Snowflake reads the Iceberg tables of an instance through a catalog integration with
@@ -207,7 +291,7 @@ ALTER ICEBERG TABLE iot_sensors_from_postgres SET AUTO_REFRESH = TRUE;
 ALTER CATALOG INTEGRATION postgres_iceberg_integration SET REFRESH_INTERVAL_SECONDS = 60;
 ```
 
-### Self-managed pg_lake
+#### Self-managed pg_lake
 
 For pg_lake on your own infrastructure, Snowflake reads the table from its files in your
 bucket. You need an
@@ -266,9 +350,9 @@ Iceberg REST catalog that both systems use, such as
 [Apache Polaris](https://polaris.apache.org/); see
 [REST catalogs](iceberg-catalogs.md#rest-catalogs).
 
-## Query from Snowflake
+#### Query from Snowflake
 
-The table behaves like any other Iceberg table in Snowflake:
+Either way, the table behaves like any other Iceberg table in Snowflake:
 
 ```sql
 SELECT reading_time::date AS reading_date,
@@ -279,10 +363,6 @@ FROM iot_sensors_from_postgres
 GROUP BY 1, 2
 ORDER BY 1, 2;
 ```
-
-Snowflake reads the table; it cannot write to it. The data stays in one copy in object storage,
-PostgreSQL remains the system of record, and both engines see the same, transactionally
-consistent snapshots.
 
 ## Going further
 

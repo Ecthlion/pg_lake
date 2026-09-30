@@ -122,7 +122,7 @@ df = table.scan(row_filter="measurement > 20").to_pandas()
 Any engine that can open an Iceberg table from a metadata file can read a snapshot of a
 pg_lake table by its `metadata_location`. The location changes on every commit, so this gives
 a point-in-time view; use a catalog to always see the latest version. The
-[Snowflake sync use case](use-case-snowflake-sync.md) uses this approach.
+[sync use case](use-case-iceberg-sync.md#duckdb) reads a table this way from DuckDB.
 
 ## REST catalogs
 
@@ -261,4 +261,4 @@ For tables that Snowflake reads, create them with `compatibility_mode = 'snowfla
 and composite types as strings, which Snowflake requires, while keeping the column type
 `uuid` in PostgreSQL.
 
-The [Snowflake sync use case](use-case-snowflake-sync.md) walks through both setups.
+The [sync use case](use-case-iceberg-sync.md#snowflake) walks through both setups.

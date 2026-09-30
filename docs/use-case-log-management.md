@@ -126,4 +126,4 @@ order by 1 asc;
 It is useful to select specific columns (avoid `select *`), since the query engine will only read necessary columns from the underlying Parquet files. Adding relevant filters (e.g. on time range) further improves performance, since the query engine can skip files and row groups within the files based on filters.
 
 To also make the logs available in Snowflake, read the Iceberg table through a catalog
-integration, as described in [syncing to Snowflake](use-case-snowflake-sync.md#read-the-table-from-snowflake).
+integration, as described in [syncing tables to Iceberg](use-case-iceberg-sync.md#snowflake).

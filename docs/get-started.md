@@ -180,4 +180,4 @@ WITH (load_from = 'https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripda
   for a real deployment.
 - [Iceberg tables](iceberg-tables.md) covers partitioning, updates, catalogs and maintenance.
 - [Use cases](use-cases.md) has end-to-end examples, such as
-  [syncing Postgres tables to Snowflake](use-case-snowflake-sync.md).
+  [syncing Postgres tables to Iceberg](use-case-iceberg-sync.md).

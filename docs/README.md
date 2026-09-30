@@ -19,7 +19,7 @@ The documentation is published at **https://snowflake-labs.github.io/pg_lake/**.
 - [dbt](./dbt.md)
 
 **Use cases**
-- [Sync Postgres tables to Snowflake](./use-case-snowflake-sync.md)
+- [Sync Postgres tables to Iceberg](./use-case-iceberg-sync.md)
 - [Log management](./use-case-log-management.md)
 - [Archive old data to Iceberg](./use-case-archiving.md)
 - [Geospatial analytics](./use-case-geospatial.md)

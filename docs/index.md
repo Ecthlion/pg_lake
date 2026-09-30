@@ -42,7 +42,7 @@ SELECT count(*) FROM raw_events JOIN events USING (id);
 <div class="pglake-cards">
   <a class="pglake-card" href="{{ '/iceberg-tables.html' | relative_url }}">
     <span class="pglake-card-title">Iceberg tables</span>
-    <span class="pglake-card-text">Create, modify and query transactional Iceberg tables with <code>USING iceberg</code>, and read them from Spark and other engines.</span>
+    <span class="pglake-card-text">Create, update and query transactional Iceberg tables with <code>USING iceberg</code>, with hidden partitioning and automatic maintenance.</span>
   </a>
   <a class="pglake-card" href="{{ '/query-data-lake-files.html' | relative_url }}">
     <span class="pglake-card-title">Query data lake files</span>
@@ -52,17 +52,34 @@ SELECT count(*) FROM raw_events JOIN events USING (id);
     <span class="pglake-card-title">Import and export</span>
     <span class="pglake-card-text">Load data from object storage and write query results back out with <code>COPY</code>, in any supported format.</span>
   </a>
-  <a class="pglake-card" href="{{ '/file-formats-reference.html' | relative_url }}">
-    <span class="pglake-card-title">File formats</span>
-    <span class="pglake-card-text">Options for Parquet, CSV, JSON, GDAL, log files, external Iceberg tables and Hugging Face datasets.</span>
+  <a class="pglake-card" href="{{ '/iceberg-catalogs.html' | relative_url }}">
+    <span class="pglake-card-title">Interoperability</span>
+    <span class="pglake-card-text">Share tables with Snowflake, Spark and pyiceberg through PostgreSQL's catalog or an Iceberg REST catalog.</span>
   </a>
   <a class="pglake-card" href="{{ '/spatial.html' | relative_url }}">
     <span class="pglake-card-title">Geospatial</span>
-    <span class="pglake-card-text">Import GeoParquet, Shapefiles, GeoJSON and more into PostGIS, with DuckDB-accelerated spatial queries.</span>
+    <span class="pglake-card-text">Query GeoParquet, Shapefiles, GeoJSON and more with PostGIS, store geometry in Iceberg, and push spatial filters down to DuckDB.</span>
   </a>
-  <a class="pglake-card" href="{{ '/dbt.html' | relative_url }}">
-    <span class="pglake-card-title">dbt</span>
-    <span class="pglake-card-text">Build and incrementally update Postgres and Iceberg tables with <code>dbt-postgres</code>.</span>
+  <a class="pglake-card" href="{{ '/performance.html' | relative_url }}">
+    <span class="pglake-card-title">Performance</span>
+    <span class="pglake-card-text">See what runs on DuckDB, how files are skipped and cached, and how to keep writes fast.</span>
+  </a>
+</div>
+
+## Use cases
+
+<div class="pglake-cards">
+  <a class="pglake-card" href="{{ '/use-case-snowflake-sync.html' | relative_url }}">
+    <span class="pglake-card-title">Sync Postgres tables to Snowflake</span>
+    <span class="pglake-card-text">Keep an Iceberg copy of operational tables up to date, and query it from Snowflake without ETL.</span>
+  </a>
+  <a class="pglake-card" href="{{ '/use-case-archiving.html' | relative_url }}">
+    <span class="pglake-card-title">Archive old data</span>
+    <span class="pglake-card-text">Move old partitions to Iceberg while applications keep querying one table.</span>
+  </a>
+  <a class="pglake-card" href="{{ '/use-case-geospatial.html' | relative_url }}">
+    <span class="pglake-card-title">Geospatial analytics</span>
+    <span class="pglake-card-text">Extract a city from Overture Maps, join it with PostGIS polygons and export GeoParquet.</span>
   </a>
 </div>
 
@@ -80,6 +97,5 @@ protocol.
 
 Running DuckDB in its own process avoids the threading and memory-safety problems of
 embedding it in PostgreSQL's process-per-connection model, and lets you connect to the query
-engine directly with any Postgres client. The
-[project README](https://github.com/Snowflake-Labs/pg_lake#architecture) describes each
-component.
+engine directly with any Postgres client. [How pg_lake works](concepts.md) describes the components, the kinds of tables, and what
+happens when you query and write.

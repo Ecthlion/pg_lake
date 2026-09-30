@@ -131,10 +131,6 @@ Iceberg tables work with most of the table features you already use:
 - [Custom functions in expressions](https://www.postgresql.org/docs/current/sql-createfunction.html)
   and [triggers](https://www.postgresql.org/docs/current/sql-createtrigger.html)
 - [PostGIS geometry](spatial.md#geometry-in-iceberg-tables) columns
-- [Declarative partitioning](https://www.postgresql.org/docs/current/ddl-partitioning.html),
-  including partitioned tables that mix heap and Iceberg partitions (see
-  [archiving](use-case-archiving.md)). For partitioning an Iceberg table itself, prefer
-  [Iceberg partitioning](iceberg-partitioning.md).
 - [Inheritance](https://www.postgresql.org/docs/current/tutorial-inheritance.html) and
   [collations](https://www.postgresql.org/docs/current/collation.html), though these can lead
   to less efficient query plans

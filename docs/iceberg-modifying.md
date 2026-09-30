@@ -50,7 +50,6 @@ The following are not yet supported on Iceberg tables:
 - `INSERT ... ON CONFLICT`
 - `SELECT ... FOR UPDATE` and `FOR SHARE`
 - Queries that use system columns such as `ctid`
-- Updates that move a row to a different partition of a declaratively partitioned table
 
 If you need upsert semantics, stage the changes in a heap table and apply them with a
 `DELETE` followed by an `INSERT` in one transaction. The [dbt integration](dbt.md) uses the same

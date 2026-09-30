@@ -75,7 +75,7 @@ SELECT count(*) FROM raw_events JOIN events USING (id);
   </a>
   <a class="pglake-card" href="{{ '/use-case-archiving.html' | relative_url }}">
     <span class="pglake-card-title">Archive old data</span>
-    <span class="pglake-card-text">Move old partitions to Iceberg while applications keep querying one table.</span>
+    <span class="pglake-card-text">Keep recent rows in PostgreSQL and move old months to cheaper Iceberg storage.</span>
   </a>
   <a class="pglake-card" href="{{ '/use-case-geospatial.html' | relative_url }}">
     <span class="pglake-card-title">Geospatial analytics</span>

@@ -21,7 +21,7 @@ pg_lake installation with object storage.
   </a>
   <a class="pglake-card" href="{{ '/use-case-archiving.html' | relative_url }}">
     <span class="pglake-card-title">Archive old data to Iceberg</span>
-    <span class="pglake-card-text">Keep recent partitions in heap tables and move old ones to Iceberg, in the same partitioned table.</span>
+    <span class="pglake-card-text">Keep recent rows in heap partitions and move old months into a partitioned Iceberg table.</span>
   </a>
   <a class="pglake-card" href="{{ '/use-case-geospatial.html' | relative_url }}">
     <span class="pglake-card-title">Geospatial analytics</span>

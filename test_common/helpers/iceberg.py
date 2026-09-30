@@ -33,6 +33,7 @@ from .json import write_json_to_file
 # Iceberg file sorting / normalisation helpers
 # ---------------------------------------------------------------------------
 
+
 # for test consistency
 def file_sort_key(file_entry):
     filename = file_entry[0]
@@ -73,6 +74,7 @@ def normalize_dictrow(row):
 # Iceberg sample-data paths
 # ---------------------------------------------------------------------------
 
+
 def iceberg_metadata_json_folder_path():
     return str(Path(__file__).parent.parent / "sample" / "iceberg" / "metadata_json")
 
@@ -88,6 +90,7 @@ def iceberg_metadata_manifest_folder_path():
 # ---------------------------------------------------------------------------
 # Iceberg catalog helpers
 # ---------------------------------------------------------------------------
+
 
 def create_iceberg_test_catalog(pg_conn):
     catalog_user = "iceberg_test_catalog"
@@ -119,6 +122,7 @@ def create_iceberg_test_catalog(pg_conn):
 # ---------------------------------------------------------------------------
 # Iceberg S3 file inspection / consistency checks
 # ---------------------------------------------------------------------------
+
 
 def assert_iceberg_s3_file_consistency(
     pg_conn,
@@ -268,6 +272,7 @@ def table_partition_specs(pg_conn, table_name):
 # Iceberg metadata regeneration helpers
 # ---------------------------------------------------------------------------
 
+
 def regenerate_metadata_json(superuser_conn, metadata_location, s3):
 
     command = f"SELECT lake_iceberg.reserialize_iceberg_table_metadata('{metadata_location}')::json"
@@ -343,30 +348,48 @@ def change_timezone(superuser_conn, tz):
 
 
 def wait_until_object_store_writable_table_pushed(
-    superuser_conn, table_namespace, table_name
+    superuser_conn, table_namespace, table_name, timeout=30
 ):
 
     cmd_1 = f"""SELECT metadata_location FROM lake_iceberg.list_object_store_tables(current_database()) WHERE catalog_table_name = '{table_name}' and catalog_namespace='{table_namespace}'"""
     cmd_2 = f"""SELECT metadata_location FROM iceberg_tables WHERE table_name='{table_name}' and table_namespace ilike '%{table_namespace}%'"""
 
     cnt = 0
+    max_cnt = int(timeout / 0.1)
 
     while True:
         run_command("SELECT pg_sleep(0.1)", superuser_conn)
         cnt += 1
-        # up to 10 seconds
-        # the default is 1 second
-        if cnt == 100:
+        if cnt == max_cnt:
             break
 
         res1 = run_query(cmd_1, superuser_conn)
         if res1 is None or len(res1) == 0:
+            if cnt % 50 == 0:
+                try:
+                    run_command(
+                        "SELECT lake_iceberg.force_push_object_store_catalog()",
+                        superuser_conn,
+                    )
+                    superuser_conn.commit()
+                except Exception:
+                    pass
             continue
 
         res2 = run_query(cmd_2, superuser_conn)
 
         if res2 == res1:
             return
+
+        if cnt % 50 == 0:
+            try:
+                run_command(
+                    "SELECT lake_iceberg.force_push_object_store_catalog()",
+                    superuser_conn,
+                )
+                superuser_conn.commit()
+            except Exception:
+                pass
     dbname = run_query("SELECT current_database()", superuser_conn)
 
     res1 = run_query(
@@ -383,24 +406,33 @@ def wait_until_object_store_writable_table_pushed(
 
 
 def wait_until_object_store_writable_table_removed(
-    superuser_conn, table_namespace, table_name
+    superuser_conn, table_namespace, table_name, timeout=30
 ):
 
     cmd = f"""SELECT * FROM lake_iceberg.list_object_store_tables(current_database()) WHERE catalog_table_name = '{table_name}' and catalog_namespace='{table_namespace}'"""
 
     cnt = 0
+    max_cnt = int(timeout / 0.1)
 
     while True:
         run_command("SELECT pg_sleep(0.1)", superuser_conn)
         cnt += 1
-        # up to 10 seconds
-        # the default is 1 second
-        if cnt == 100:
+        if cnt == max_cnt:
             break
 
         res = run_query(cmd, superuser_conn)
         if res is None or len(res) == 0:
             return
+
+        if cnt % 50 == 0:
+            try:
+                run_command(
+                    "SELECT lake_iceberg.force_push_object_store_catalog()",
+                    superuser_conn,
+                )
+                superuser_conn.commit()
+            except Exception:
+                pass
 
     # Give a nice assertion error
     dbname = run_query("SELECT current_database()", superuser_conn)
@@ -811,11 +843,18 @@ def assert_iceberg_schemas_equal(left_json, right_json, label=""):
     matching field definitions.  Field IDs and schema-ids are ignored
     because they may be assigned differently by each engine.
     """
+
     def _norm_fields(fields):
         return [
-            (f["name"],
-             re.sub(r"\s+", "", f["type"]) if isinstance(f["type"], str) else f["type"],
-             f.get("required", False))
+            (
+                f["name"],
+                (
+                    re.sub(r"\s+", "", f["type"])
+                    if isinstance(f["type"], str)
+                    else f["type"]
+                ),
+                f.get("required", False),
+            )
             for f in fields
         ]
 

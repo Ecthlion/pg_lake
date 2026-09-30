@@ -272,6 +272,8 @@ def test_simple_data_pruning_for_data_types(
 
     explain_prefix = "EXPLAIN (analyze, verbose, format json) "
 
+    table_name = f"{table_name}_{partition_type}"
+
     # Drop schema if it exists from a previous failed run
     run_command("DROP SCHEMA IF EXISTS test_data_file_pruning CASCADE", pg_conn)
     pg_conn.commit()

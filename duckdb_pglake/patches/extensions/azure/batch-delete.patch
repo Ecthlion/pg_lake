@@ -14,7 +14,7 @@ index f342821..83383c5 100644
  
  namespace duckdb {
  
-@@ -416,6 +419,91 @@ bool AzureBlobStorageFileSystem::TryRemoveFile(const string &filename, optional_
+@@ -416,6 +419,93 @@ bool AzureBlobStorageFileSystem::TryRemoveFile(const string &filename, optional_
  	return blob_client.DeleteIfExists().Value.Deleted;
  }
  
@@ -30,7 +30,9 @@ index f342821..83383c5 100644
 + *
 + * Errors on individual blobs are checked via the DeferredResponse from
 + * each subrequest. BlobNotFound (404) is tolerated -- a blob that is already
-+ * gone is not an error. Any other per-blob failure throws.
++ * gone is not an error. Any other failure throws right away, leaving the
++ * remaining batches and containers unattempted, as the S3 path does: the
++ * pg_lake retries a failed request one path at a time.
 + */
 +void AzureBlobStorageFileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpener> opener) {
 +	if (paths.empty()) {

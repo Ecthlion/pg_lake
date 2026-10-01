@@ -45,7 +45,8 @@ Without `pg_lake_spatial`, creating a table on a GeoParquet file fails with an e
   on regular tables loaded from the same files.
 - **Export GeoParquet** with `COPY ... TO`, for QGIS, GeoPandas, DuckDB or Snowflake.
 
-The [geospatial analytics use case](use-case-geospatial.md) combines these in one workflow.
+The [geospatial analytics use case](use-case-geospatial.md) combines these in one workflow, from
+public data sets to a map in QGIS.
 
 ## Bringing geospatial data into PostgreSQL
 
@@ -335,59 +336,10 @@ of:
   returns `POINT (4.89 52.37)`, with a space after the type name, where PostGIS returns
   `POINT(4.89 52.37)`.
 
-## Using QGIS
+## Mapping tools
 
-[QGIS](https://qgis.org/) connects to pg_lake like to any PostgreSQL database. Add a PostgreSQL
-connection that points to your server:
-
-![Adding a PostgreSQL connection in QGIS](https://imagedelivery.net/lPM0ntuwQfh8VQgJRu0mFg/7f7ead6d-60ac-43c2-2231-340c6d920700/public)
-
-Your tables and views appear in the Browser panel under their schema, and you can add them to
-the project as layers:
-
-![Adding tables as layers in QGIS](https://imagedelivery.net/lPM0ntuwQfh8VQgJRu0mFg/118e795d-9f60-4ae4-40b4-b1608f072000/public)
-
-Since geometry read from files has SRID 0, QGIS cannot detect the coordinate reference system.
-Set it on the layer:
-
-![Setting the layer CRS in QGIS](https://imagedelivery.net/lPM0ntuwQfh8VQgJRu0mFg/b9341a4b-df14-4105-bed2-b0166fe00a00/public)
-
-or create a view that sets or transforms the SRID:
-
-```sql
-CREATE VIEW points_wgs84 AS
-SELECT point_id, ST_Transform(geom, 'EPSG:27700', 'EPSG:4326') AS geom
-FROM points;
-```
-
-### Combining data sets
-
-Because almost any public data set is one `CREATE FOREIGN TABLE` away, you can combine data
-sets from different publishers directly. For example, to find the national forests in the US
-that had fires in 2022:
-
-```sql
--- National Forest System boundaries
-CREATE FOREIGN TABLE forests () SERVER pg_lake
-OPTIONS (path 'https://data.fs.usda.gov/geodata/edw/edw_resources/shp/S_USA.AdministrativeForest.zip');
-
--- fire occurrence points in the US
-CREATE FOREIGN TABLE fires () SERVER pg_lake
-OPTIONS (path 'https://data.fs.usda.gov/geodata/edw/edw_resources/shp/S_USA.MTBS_FIRE_OCCURRENCE_PT.zip');
-
--- fires in national forests in 2022
-CREATE VIEW nfs_fires_in_2022 AS
-SELECT fires.*, forests.adminfores
-FROM forests, fires
-WHERE ST_Within(fires.geom, forests.geom)
-AND date_trunc('year', ig_date) = '2022-01-01';
-
--- the forests that had fires in 2022
-CREATE VIEW forests_with_fires_in_2022 AS
-SELECT * FROM forests
-WHERE adminfores IN (SELECT adminfores FROM nfs_fires_in_2022);
-```
-
-Loading these views as layers in QGIS shows which national forests had fires in 2022:
-
-![National forests with fires in 2022 in QGIS](https://imagedelivery.net/lPM0ntuwQfh8VQgJRu0mFg/184c88a3-15bd-49af-6755-42d714d3d800/public)
+[QGIS](https://qgis.org/) and other GIS tools connect to pg_lake like to any PostgreSQL
+database, and show tables and views with geometry columns as layers. Declare the SRID on
+geometry columns, such as `geometry(Point, 4326)`, so that these tools can detect the
+coordinate system. See [visualizing in QGIS](use-case-geospatial.md#visualize-in-qgis) for a
+walkthrough.

@@ -79,7 +79,7 @@ SELECT count(*) FROM raw_events JOIN events USING (id);
   </a>
   <a class="pglake-card" href="{{ '/use-case-geospatial.html' | relative_url }}">
     <span class="pglake-card-title">Geospatial analytics</span>
-    <span class="pglake-card-text">Extract a city from Overture Maps, join it with PostGIS polygons and export GeoParquet.</span>
+    <span class="pglake-card-text">Query public map data in place, extract it into Iceberg and PostGIS tables, and map the results in QGIS.</span>
   </a>
 </div>
 

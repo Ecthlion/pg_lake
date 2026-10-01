@@ -25,7 +25,7 @@ pg_lake installation with object storage.
   </a>
   <a class="pglake-card" href="{{ '/use-case-geospatial.html' | relative_url }}">
     <span class="pglake-card-title">Geospatial analytics</span>
-    <span class="pglake-card-text">Extract a city from Overture Maps into Iceberg, join it with PostGIS polygons and export GeoParquet.</span>
+    <span class="pglake-card-text">Query public GeoParquet and Shapefiles in place, extract them into Iceberg and PostGIS tables, run spatial joins and map the results in QGIS.</span>
   </a>
   <a class="pglake-card" href="{{ '/use-case-migrate.html' | relative_url }}">
     <span class="pglake-card-title">Migrate tables to Iceberg</span>

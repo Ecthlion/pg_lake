@@ -1,7 +1,7 @@
 diff --git a/sdk/core/azure-core/src/http/curl/curl.cpp b/sdk/core/azure-core/src/http/curl/curl.cpp
 --- a/sdk/core/azure-core/src/http/curl/curl.cpp
 +++ b/sdk/core/azure-core/src/http/curl/curl.cpp
-@@ -388,6 +388,9 @@
+@@ -390,6 +390,9 @@
      {
        break;
      }

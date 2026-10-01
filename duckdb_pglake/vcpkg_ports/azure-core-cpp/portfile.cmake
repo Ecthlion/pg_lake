@@ -5,10 +5,9 @@ vcpkg_from_github(
     OUT_SOURCE_PATH SOURCE_PATH
     REPO Azure/azure-sdk-for-cpp
     REF "azure-core_${VERSION}"
-    SHA512 30b949e1154674b474287a4b36a29270d9fdd7a1f5b43d2507859f0a75176821a98c9a700665b513cc5e36a8089d48d614838ed0f900f42ef5c87dd92f2805b6
+    SHA512 1b092599b9cd10f076ec14ea050216ab23914389ad1ed5470fb1e3c5324e3b109fdf90fc3f4a513796a3e6f103eedf5ee36404d0d05bdcc1fdfac2e5353e544c
     HEAD_REF main
     PATCHES
-        dt_android.patch
         rewind-body-on-reconnect.patch
 )
 
@@ -20,6 +19,12 @@ vcpkg_check_features(
 )
 
 file(GLOB_RECURSE unused "${SOURCE_PATH}/cgmanifest.json")
+file(REMOVE_RECURSE ${unused})
+
+file(GLOB_RECURSE unused "${SOURCE_PATH}/Cargo.toml")
+file(REMOVE_RECURSE ${unused})
+
+file(GLOB_RECURSE unused "${SOURCE_PATH}/Cargo.lock")
 file(REMOVE_RECURSE ${unused})
 
 if(EXISTS "${SOURCE_PATH}/sdk/core/azure-core")

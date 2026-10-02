@@ -83,18 +83,13 @@ that match no other partition.
 Then create the Iceberg table for the history:
 
 ```sql
-CREATE TABLE app_events_archive (
-  event_id bigint,
-  event_time timestamptz,
-  user_id bigint,
-  event_type text,
-  payload jsonb
-) USING iceberg WITH (partition_by = 'month(event_time)');
+CREATE TABLE app_events_archive (LIKE app_events)
+USING iceberg WITH (partition_by = 'month(event_time)');
 ```
 
-The archive has the same columns as `app_events`, in the same order, so rows can be copied with
-`SELECT *`. It does not need the identity or `NOT NULL` constraints: the rows already satisfied
-them in the heap table.
+`LIKE` gives the archive the same columns as `app_events`, in the same order, so rows can be
+copied with `SELECT *`. It also copies the `NOT NULL` constraints, but not the identity, so the
+archive keeps the `event_id` values the heap table assigned.
 
 ## Move old partitions to Iceberg
 

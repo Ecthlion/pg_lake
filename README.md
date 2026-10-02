@@ -2,6 +2,8 @@
 
 `pg_lake` integrates Iceberg and data lake files into Postgres. With the `pg_lake` extensions, you can use Postgres as a stand-alone lakehouse system that supports transactions and fast queries on Iceberg tables, and can directly work with raw data files in object stores like S3.
 
+**Documentation: [snowflake-labs.github.io/pg_lake](https://snowflake-labs.github.io/pg_lake/)**, with a getting started guide, the user guide, use cases and reference pages.
+
 At a high level, `pg_lake` lets you:
 
 - **Create and modify [Iceberg](https://iceberg.apache.org/)** tables directly from PostgreSQL, with full transactional guarantees and query them from other engines
@@ -229,7 +231,7 @@ In June 2025, [Crunchy Data was acquired by Snowflake](https://www.crunchydata.c
 
 ## Documentation
 
-Full project documentation can be found in the [docs](./docs) directory.
+The full documentation is at [snowflake-labs.github.io/pg_lake](https://snowflake-labs.github.io/pg_lake/). Its sources are in the [docs](./docs) directory.
 
 
 ## License

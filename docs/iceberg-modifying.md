@@ -102,11 +102,46 @@ ERROR:  ALTER TABLE ADD COLUMN with default expression command not supported for
 ALTER TABLE measurements ALTER COLUMN last_update_time SET DEFAULT now();
 ```
 
+### Changing the type of a column
+
+`ALTER COLUMN ... TYPE` accepts the type promotions that Iceberg allows without rewriting data
+files. Existing data files keep their old type, and readers widen the values when they read
+them:
+
+| From | To |
+|:--|:--|
+| `smallint`, `integer` | `bigint` (and `smallint` to `integer`) |
+| `real` | `double precision` |
+| `numeric(P, S)` | `numeric(P2, S)` with `P2` greater than `P` and the same scale |
+
+```sql
+CREATE TABLE readings (sensor_id int, value real, cost numeric(10,2)) USING iceberg;
+
+ALTER TABLE readings ALTER COLUMN sensor_id TYPE bigint;
+ALTER TABLE readings ALTER COLUMN value TYPE double precision;
+ALTER TABLE readings ALTER COLUMN cost TYPE numeric(14,2);
+```
+
+Any other change is rejected, including a narrower type, a different numeric scale, a longer
+`varchar`, `text`, `timestamp` to `timestamptz`, and a `USING` clause. For those, add a column
+of the new type, fill it and swap it in, which does rewrite the data files and moves the column
+to the end of the table:
+
+```sql
+-- turn sensor_id into text
+BEGIN;
+ALTER TABLE readings ADD COLUMN sensor_id_new text;
+UPDATE readings SET sensor_id_new = sensor_id::text;
+ALTER TABLE readings DROP COLUMN sensor_id;
+ALTER TABLE readings RENAME COLUMN sensor_id_new TO sensor_id;
+COMMIT;
+```
+
 ### Unsupported schema changes
 
 These `ALTER TABLE` forms are not yet supported:
 
-- Changing the type of a column (`ALTER COLUMN ... SET TYPE`)
+- Changing the type of a column, other than the [type promotions](#changing-the-type-of-a-column) above
 - Adding or validating constraints
 - Adding a generated column, a `serial` column, or a column with a constraint
 - Adding a column of a type Iceberg cannot store (see [data types](data-types.md))

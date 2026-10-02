@@ -22,22 +22,24 @@ description: pg_lake integrates Iceberg and data lake files into Postgres.
 
 ## A quick look
 
-pg_lake adds three things to PostgreSQL: foreign tables that query files where they are,
-Iceberg tables that live in object storage, and `COPY` to and from URLs. Everything is plain SQL
-from psql or any PostgreSQL client, and the heavy lifting runs on DuckDB.
+pg_lake turns PostgreSQL into a lakehouse. Add `USING iceberg` to `CREATE TABLE` and you get a
+transactional table whose data is stored as Parquet files in your object storage bucket, in the
+open Iceberg format that Spark, DuckDB and Snowflake can read too. The same extensions let you
+query raw Parquet, CSV and JSON files where they are, and `COPY` to and from URLs. Everything is
+plain SQL from psql or any PostgreSQL client, and the heavy lifting runs on DuckDB.
 
-**Query a file where it is.** Point a foreign table at a Parquet, CSV or JSON file, or at a
-wildcard that matches many files, and leave the column list empty to infer the columns. This
-is a public file with 3 million New York taxi trips, queried over HTTPS:
+**Create an Iceberg table.** `load_from` creates the table from a file and loads it in one step,
+here a public file with 3 million New York taxi trips. Analytical queries run on DuckDB's
+columnar engine:
 
 ```sql
-CREATE FOREIGN TABLE taxi_trips () SERVER pg_lake
-  OPTIONS (path 'https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2024-01.parquet');
+CREATE TABLE trips () USING iceberg
+  WITH (load_from = 'https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2024-01.parquet');
 
 -- which hours have the best tips?
 SELECT extract(hour FROM tpep_pickup_datetime) AS hour, count(*) AS trips,
        round(avg(tip_amount)::numeric, 2) AS avg_tip
-FROM taxi_trips GROUP BY 1 ORDER BY avg_tip DESC LIMIT 3;
+FROM trips GROUP BY 1 ORDER BY avg_tip DESC LIMIT 3;
 
  hour | trips  | avg_tip
 ------+--------+---------
@@ -46,15 +48,15 @@ FROM taxi_trips GROUP BY 1 ORDER BY avg_tip DESC LIMIT 3;
    22 | 143261 |    3.56
 ```
 
-**Turn it into an Iceberg table.** `load_from` creates the table and loads the file in one
-step. The data is stored as Parquet in your bucket, and the table supports `UPDATE`, `DELETE`
-and transactions like any other PostgreSQL table:
+**Change it like any other table.** Iceberg tables support `INSERT`, `UPDATE`, `DELETE`,
+`MERGE` and transactions, and pg_lake compacts the files and expires old snapshots in the
+background:
 
 ```sql
-CREATE TABLE trips () USING iceberg
-  WITH (load_from = 'https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2024-01.parquet');
-
+BEGIN;
 DELETE FROM trips WHERE total_amount < 0;
+UPDATE trips SET passenger_count = 1 WHERE passenger_count = 0;
+COMMIT;
 ```
 
 **Move old rows out of PostgreSQL.** Regular tables and Iceberg tables can be used in the same
@@ -70,16 +72,27 @@ WITH moved AS (
 INSERT INTO orders_history SELECT * FROM moved;
 ```
 
-**Export a report.** `COPY ... TO` writes any query result to object storage as Parquet, CSV or
-JSON:
+**Read the tables from other engines.** pg_lake writes standard Iceberg metadata, so Spark,
+pyiceberg, DuckDB and Snowflake can read the same tables, through PostgreSQL as the catalog or
+from the metadata file:
 
 ```sql
-COPY (SELECT tpep_pickup_datetime::date AS day, count(*) AS trips FROM trips GROUP BY 1 ORDER BY 1)
-TO 's3://mybucket/reports/trips_per_day.csv' WITH (header true);
+SELECT table_name, metadata_location FROM iceberg_tables;
+```
+
+**Query files where they are.** A foreign table reads Parquet, CSV or JSON files in place,
+including every file that matches a wildcard. Leave the column list empty to infer the columns:
+
+```sql
+CREATE FOREIGN TABLE clicks () SERVER pg_lake
+  OPTIONS (path 's3://mybucket/clicks/2026/*/*.parquet');
+
+SELECT page, count(*) FROM clicks GROUP BY page ORDER BY 2 DESC LIMIT 10;
 ```
 
 **Load new files as they arrive.** With [pg_incremental](https://github.com/CrunchyData/pg_incremental),
-a pipeline loads every file that is already in a bucket, then each new one exactly once:
+a pipeline loads every file that is already in a bucket into an Iceberg table, then each new
+one exactly once:
 
 ```sql
 CREATE FOREIGN TABLE order_files () SERVER pg_lake
@@ -89,17 +102,17 @@ SELECT incremental.create_file_list_pipeline('import-orders',
   file_pattern := 's3://mybucket/inbox/*.csv',
   batched := true,
   command := $$
-    INSERT INTO orders SELECT order_id, order_date, amount
+    INSERT INTO orders_history SELECT order_id, order_date, amount
     FROM order_files WHERE _filename = any($1)
   $$);
 ```
 
-**Read the tables from other engines.** pg_lake writes standard Iceberg metadata, so Spark,
-pyiceberg, DuckDB and Snowflake can read the same tables, through PostgreSQL as the catalog or
-from the metadata file:
+**Export a report.** `COPY ... TO` writes any query result to object storage as Parquet, CSV or
+JSON:
 
 ```sql
-SELECT table_name, metadata_location FROM iceberg_tables;
+COPY (SELECT tpep_pickup_datetime::date AS day, count(*) AS trips FROM trips GROUP BY 1 ORDER BY 1)
+TO 's3://mybucket/reports/trips_per_day.csv' WITH (header true);
 ```
 
 ## What you can do

@@ -443,10 +443,10 @@ StartAttachedWorkerInternal(char *command, char *databaseName, char *userName,
 	BackgroundWorkerHandle *workerHandle;
 
 	/*
-	 * In TopMemoryContext, because the handle outlives this call by as long as
-	 * the worker does: it is what StopLiveAttachedWorkersAtExit terminates the
-	 * worker through, and that runs after the context this was called in has
-	 * been reset.  EndAttachedWorker frees it.
+	 * In TopMemoryContext, because the handle outlives this call by as long
+	 * as the worker does: it is what StopLiveAttachedWorkersAtExit terminates
+	 * the worker through, and that runs after the context this was called in
+	 * has been reset.  EndAttachedWorker frees it.
 	 */
 	MemoryContext callerContext = MemoryContextSwitchTo(TopMemoryContext);
 	bool		registered = RegisterDynamicBackgroundWorker(&worker, &workerHandle);
@@ -817,6 +817,11 @@ TrackLiveAttachedWorker(BackgroundWorkerHandle *workerHandle)
 		LiveAttachedWorkerExitCallbackSet = true;
 	}
 
+	/*
+	 * The switch is for the list, which the first lappend here allocates; the
+	 * handle it comes to hold is already in TopMemoryContext, put there by
+	 * StartAttachedWorkerInternal when it registered the worker.
+	 */
 	MemoryContext callerContext = MemoryContextSwitchTo(TopMemoryContext);
 
 	LiveAttachedWorkerHandles = lappend(LiveAttachedWorkerHandles, workerHandle);
@@ -832,14 +837,16 @@ TrackLiveAttachedWorker(BackgroundWorkerHandle *workerHandle)
 static void
 ForgetLiveAttachedWorker(BackgroundWorkerHandle *workerHandle)
 {
+	pid_t		workerPid PG_USED_FOR_ASSERTS_ONLY = 0;
+
 	if (workerHandle == NULL)
 		return;
 
-	MemoryContext callerContext = MemoryContextSwitchTo(TopMemoryContext);
+	Assert(GetBackgroundWorkerPid(workerHandle, &workerPid) == BGWH_STOPPED);
 
+	/* no switch needed: list_delete_ptr only shrinks the list in place */
 	LiveAttachedWorkerHandles = list_delete_ptr(LiveAttachedWorkerHandles,
 												workerHandle);
-	MemoryContextSwitchTo(callerContext);
 
 	pfree(workerHandle);
 }
@@ -859,6 +866,12 @@ StopLiveAttachedWorkersAtExit(int code, Datum arg)
 {
 	ListCell   *handleCell = NULL;
 
+	/*
+	 * No PG_TRY around this: neither call below throws.  proc_exit_prepare
+	 * raised InterruptHoldoffCount before running us, so the
+	 * CHECK_FOR_INTERRUPTS inside the wait cannot fire, and a postmaster that
+	 * dies while we wait is reported as a status rather than an error.
+	 */
 	foreach(handleCell, LiveAttachedWorkerHandles)
 	{
 		BackgroundWorkerHandle *workerHandle =
@@ -869,7 +882,13 @@ StopLiveAttachedWorkersAtExit(int code, Datum arg)
 			continue;
 
 		TerminateBackgroundWorker(workerHandle);
-		WaitForBackgroundWorkerShutdown(workerHandle);
+
+		/*
+		 * Without a postmaster there is nothing left to reap the rest of the
+		 * list with, and those workers are going down with it anyway.
+		 */
+		if (WaitForBackgroundWorkerShutdown(workerHandle) == BGWH_POSTMASTER_DIED)
+			break;
 	}
 
 	LiveAttachedWorkerHandles = NIL;

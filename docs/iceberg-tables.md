@@ -78,7 +78,7 @@ Iceberg tables support the following options when creating the table:
 | location             | URL prefix for the Iceberg table (e.g. `s3://mybucket/measurements`) |
 | max_snapshot_age     | Maximum age (in seconds) of snapshots to retain. When set to `0`, old snapshots are automatically expired during writes. Overrides the `pg_lake_iceberg.max_snapshot_age` GUC for this table. |
 | out_of_range_values  | How to handle values that fall outside the Iceberg-representable range. Valid values: `error` (default), `clamp`. See [Out-of-range value handling](#out-of-range-value-handling). |
-| lowercase_column_names | For `read_only` tables in an external catalog, fold column and struct field names to lowercase. Default `false`. See [Iceberg tables in a REST catalog](#iceberg-tables-in-a-rest-catalog). |
+| lowercase_column_names | For `read_only` tables in an external catalog, fold column and struct field names to lowercase. Default `false`. See [Iceberg tables in a REST catalog](#iceberg-tables-in-a-rest-catalog). Also accepted with `load_from` or `definition_from` pointing at an Iceberg metadata file. |
 
 Additionally, when creating the Iceberg table from a file, the following options are supported along with the format-specific options listed in the [data lake formats](file-formats-reference.md) section:
 

@@ -188,8 +188,6 @@ FROM lake_file_cache.list() ORDER BY last_access_time DESC;
 SELECT lake_file_cache.add(path) FROM lake_file.list('s3://mybucket/sales/2026/*.parquet');
 ```
 
-Files read over `hf://` (Hugging Face) are not cached.
-
 ## Faster writes
 
 - **Write in batches.** Each `INSERT`, `COPY` or `UPDATE` statement writes at least one new

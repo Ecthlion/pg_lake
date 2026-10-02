@@ -174,31 +174,6 @@ Note that changes to the external Iceberg table will **not** be reflected in the
 ALTER FOREIGN TABLE external_iceberg OPTIONS (SET path 's3://mybucket/table/v15.metadata.json');
 ```
 
-## Hugging Face
-
-[**Hugging Face**](https://huggingface.co/) is a widely used platform for sharing machine learning models and training data. You can query files directly using a **`hf://`** prefix instead of **`s3`**. Hugging Face file URLs look something like this:
-
-```
-https://huggingface.co/datasets/microsoft/orca-math-word-problems-200k/blob/main/data/train-00000-of-00001.parquet
-```
-
-In the `hf://` URL, leave out the **`/blob/main/`** part:
-
-```sql
-CREATE FOREIGN TABLE word_problems ()
-SERVER pg_lake OPTIONS
-(path 'hf://datasets/microsoft/orca-math-word-problems-200k/data/train-00000-of-00001.parquet');
-```
-
-You can also use the wildcard path with the user and project name to create a foreign table for a batch of parquet files:
-
-```sql
-CREATE FOREIGN TABLE word_problems ()
-SERVER pg_lake OPTIONS
-(path 'hf://datasets/microsoft/orca-math-word-problems-200k@~parquet/**/*.parquet');
-```
-The Hugging Face URLs currently do not use caching. If you access a data set frequently, we recommend moving the data to S3 or loading it into a Postgres table.
-
 ## Postgres tables
 
 You can create regular (”heap”) tables in PostgreSQL as usual.

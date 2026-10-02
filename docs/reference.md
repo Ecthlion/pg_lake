@@ -14,4 +14,4 @@ has_toc: false
 - [Configuration parameters](settings-reference.md): every pg_lake setting, with defaults.
 - [Data types](data-types.md): how PostgreSQL types map to Iceberg and Parquet.
 - [File formats](file-formats-reference.md): Parquet, CSV, JSON, GDAL, logs, external Iceberg
-  and Delta tables, and Hugging Face.
+  and Delta tables.

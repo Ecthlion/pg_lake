@@ -142,7 +142,6 @@ with MinIO, see [running MinIO locally](building-from-source.md#running-s3-compa
 | `az://`, `azure://`, `abfss://` | Azure Blob Storage and Data Lake Storage | Yes | Yes |
 | `r2://` | Cloudflare R2 | Yes | Yes |
 | `https://`, `http://` | Public web servers | Yes | No |
-| `hf://` | [Hugging Face](file-formats-reference.md#hugging-face) datasets | Yes | No |
 
 pg_lake detects the region of S3 buckets automatically. For the best performance and to avoid
 data transfer charges, keep buckets that you write to or query often in the same region as

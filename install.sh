@@ -274,8 +274,11 @@ install_system_deps() {
             ;;
         rhel)
             sudo dnf -y update
-            sudo dnf -y install epel-release
-            sudo dnf config-manager --enable crb 2>/dev/null || sudo dnf config-manager --set-enabled crb 2>/dev/null || true
+            # Fedora ships these packages in its own repositories; EPEL and CRB only exist on RHEL clones
+            if [[ "$ID" != "fedora" ]]; then
+                sudo dnf -y install epel-release
+                sudo dnf config-manager --enable crb 2>/dev/null || sudo dnf config-manager --set-enabled crb 2>/dev/null || true
+            fi
             sudo dnf -y install \
                 cmake \
                 ninja-build \

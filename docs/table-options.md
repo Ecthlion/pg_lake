@@ -59,7 +59,7 @@ Options for `CREATE FOREIGN TABLE ... SERVER pg_lake`, which queries files in pl
 | `path` | URL of a file, or a pattern with `*` and `**` wildcards. Required unless `writable` is set. |
 | `format` | `parquet`, `csv`, `json`, `gdal`, `iceberg`, `delta` or `log`. Inferred from the file extension if omitted. |
 | `compression` | `gzip`, `zstd`, `snappy`, `zip` or `none`, depending on the format. Inferred from the extension if omitted. |
-| `filename` | `true` adds a `_filename` column with the source file of each row. |
+| `filename` | `true` adds a `_filename` column with the source file of each row. With an explicit column list, declare `_filename text` as the last column. See [loading new files as they arrive](data-lake-import-export.md#load-new-files-as-they-arrive). |
 | `writable` | `true` makes the table accept `INSERT`, writing new files under `location`. |
 | `location` | URL prefix for new files of a writable table. |
 

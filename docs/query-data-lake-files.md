@@ -92,7 +92,7 @@ included automatically.
 
 With `filename 'true'`, the table gets an extra `_filename` column with the URL of the file
 each row came from. Filtering on it only reads the matching files, which makes it useful for
-[processing new files incrementally](use-case-log-management.md):
+[loading new files as they arrive](data-lake-import-export.md#load-new-files-as-they-arrive):
 
 ```sql
 CREATE FOREIGN TABLE events_source () SERVER pg_lake
@@ -100,6 +100,8 @@ OPTIONS (path 's3://pglakedemobucket/events/*.csv', filename 'true');
 
 SELECT _filename, count(*) FROM events_source GROUP BY 1;
 ```
+
+If you list the columns yourself, add `_filename text` as the last column.
 
 ### Hive-style partitions
 

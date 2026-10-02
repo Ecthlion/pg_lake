@@ -62,6 +62,75 @@ OPTIONS (path 's3://mybucket/trips/*.parquet');
 INSERT INTO trips SELECT * FROM trips_files WHERE pickup_time >= '2026-10-01';
 ```
 
+### Load new files as they arrive
+
+When files keep landing in a bucket, for example a daily export from another system or logs
+written every few minutes, you can load each file exactly once, as soon as it appears, with a
+file list pipeline from [pg_incremental](https://github.com/CrunchyData/pg_incremental). The
+pipeline first loads all files that already exist, then checks for new ones on a schedule, and
+works for Iceberg and regular PostgreSQL tables alike.
+
+It needs two pieces. First, a foreign table on the files with the `filename` option, which adds
+a `_filename` column with the URL that each row came from:
+
+```sql
+CREATE FOREIGN TABLE orders_files () SERVER pg_lake
+OPTIONS (path 's3://mybucket/inbox/*.csv', filename 'true');
+
+-- the table to load into: Iceberg here, or a regular table without USING iceberg
+CREATE TABLE orders (LIKE orders_files) USING iceberg;
+```
+
+Because `orders` is created with `LIKE`, it also gets the `_filename` column, so you can always
+tell which file a row came from. To leave it out, list the columns in the pipeline command.
+
+The columns of `orders_files` are inferred once, from the files that exist when you create it.
+For a pipeline that will run for a long time, consider listing the columns explicitly, with
+`_filename text` as the last one, so that a malformed file cannot change the inferred types.
+
+Second, the pipeline. pg_incremental lists the files that match `file_pattern` with
+`lake_file.list`, and runs the command with `$1` set to the files it has not processed yet.
+Filtering on `_filename` means each run only reads those files:
+
+```sql
+SELECT incremental.create_file_list_pipeline('import-orders',
+  file_pattern := 's3://mybucket/inbox/*.csv',
+  batched := true,
+  command := $$
+    INSERT INTO orders SELECT * FROM orders_files WHERE _filename = any($1)
+  $$);
+
+NOTICE:  pipeline import-orders: processing file list pipeline for 2 files
+NOTICE:  pipeline import-orders: scheduled cron job with ID 1 and schedule */15 * * * *
+```
+
+The files a pipeline has processed are recorded in `incremental.processed_files` in the same
+transaction as the insert, so each file is loaded exactly once, even if a run fails and is
+retried. Options that are worth knowing:
+
+| Argument | Description |
+|:--|:--|
+| `batched` | `true` passes up to `max_batch_size` (default 100) paths as a `text[]`, loaded in one transaction. `false` (default) runs the command once per file, with `$1` a single path: `WHERE _filename = $1`. Batches write fewer, larger files, which is better for Iceberg. |
+| `schedule` | pg_cron schedule for checking for new files. Default every 15 minutes. |
+| `execute_immediately` | `false` skips loading the existing files when the pipeline is created; they are loaded on the first scheduled run instead. |
+| `max_batches_per_run` | Limit the number of batches per run, to spread out a large backfill. Default no limit. |
+
+To run a pipeline right away instead of waiting for the schedule, use
+`CALL incremental.execute_pipeline('import-orders')`. If a file cannot be loaded, the whole
+batch fails and is retried on the next run, without loading part of it. Fix or remove the file,
+or mark it as processed so the pipeline moves on:
+
+```sql
+SELECT incremental.skip_file('import-orders', 's3://mybucket/inbox/orders-2026-09-04.csv');
+```
+
+`incremental.drop_pipeline('import-orders')` stops the pipeline. See the
+[pg_incremental documentation](https://github.com/CrunchyData/pg_incremental) for monitoring,
+and the [log management use case](use-case-log-management.md) for a complete example that also
+transforms the rows on the way in. pg_incremental needs [pg_cron](https://github.com/citusdata/pg_cron)
+in `shared_preload_libraries`, and pipelines are created in the database where pg_cron is
+installed (`cron.database_name`).
+
 ### Formats and compression
 
 The format is detected from the file extension; specify `format` for files without one:

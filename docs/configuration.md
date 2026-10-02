@@ -76,8 +76,8 @@ postgres=> SET GLOBAL threads = 16;
 
 ## Object storage credentials
 
-pg_lake never passes credentials through PostgreSQL. pgduck_server accesses object storage using
-DuckDB's [secrets manager](https://duckdb.org/docs/stable/configuration/secrets_manager):
+pgduck_server, not PostgreSQL, holds the credentials for object storage. It accesses object storage
+using DuckDB's [secrets manager](https://duckdb.org/docs/stable/configuration/secrets_manager):
 
 - **AWS and Google Cloud:** by default, pgduck_server uses the standard credential chain:
   environment variables, `~/.aws/credentials`, instance profiles and so on. On a cloud VM with
@@ -132,6 +132,12 @@ CREATE SECRET azure (
 
 Keep the init file readable only by the user that runs pgduck_server. For local development
 with MinIO, see [running MinIO locally](building-from-source.md#running-s3-compatible-service-minio-locally).
+
+Credentials only go through PostgreSQL when a REST catalog vends them
+(`enable_vended_credentials`). PostgreSQL then asks the catalog for temporary S3 credentials for
+each table it reads or writes, and passes them to pgduck_server as in-memory secrets scoped to
+that table's location, where they take precedence over pgduck_server's own secrets. See
+[REST catalogs](iceberg-catalogs.md#rest-catalogs).
 
 ### Supported storage URLs
 

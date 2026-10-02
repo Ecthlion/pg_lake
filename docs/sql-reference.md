@@ -54,8 +54,9 @@ Return the size of a file in bytes, and whether it exists.
 lake_file.delete(url text) RETURNS void
 ```
 
-Deletes a file from object storage. Disabled unless a superuser sets
-`pg_lake_table.enable_delete_file_function = on`.
+Deletes a file from object storage. Requires `lake_write`, and is disabled unless a superuser
+sets `pg_lake_table.enable_delete_file_function = on`. Wildcards are not expanded. See
+[delete files](data-lake-import-export.md#delete-files).
 
 ## File cache
 

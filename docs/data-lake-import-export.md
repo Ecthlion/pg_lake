@@ -119,6 +119,37 @@ which is typically the case for queries on Iceberg tables and files. Exports are
 one file per `COPY`; to write a data set in many files, run several `COPY` statements, for
 example one per day.
 
+## Delete files
+
+`lake_file.delete(url)` deletes one file from object storage. Deletion cannot be undone, so the
+function is off until a superuser enables it with `pg_lake_table.enable_delete_file_function`,
+which can be set for the whole server, for one database, or for one role:
+
+```sql
+-- let the exporter role delete files, as a superuser
+ALTER ROLE exporter SET pg_lake_table.enable_delete_file_function = on;
+```
+
+The caller also needs the `lake_write` role (or `lake_read_write`), like any other write to a
+URL. Only superusers can change the setting, so a role cannot turn it on for itself.
+
+The URL must name a single file; wildcards are not expanded. To delete several files, list
+them first:
+
+```sql
+-- delete last year's exports
+SELECT lake_file.delete(path)
+FROM lake_file.list('s3://mybucket/exports/2025/*.parquet');
+```
+
+Deleting a file that does not exist is not an error.
+
+{: .warning }
+Do not use `lake_file.delete` on files that belong to an Iceberg table. pg_lake removes those
+itself through the [deletion queue](iceberg-maintenance.md#the-deletion-queue), after
+`pg_lake_engine.orphaned_file_retention_period`. Deleting a file that a table still references
+breaks queries on the table.
+
 ## Client-side import and export
 
 pg_lake's formats also work with psql's `\copy`, which reads and writes files on the client

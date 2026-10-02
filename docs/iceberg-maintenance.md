@@ -201,6 +201,15 @@ LIMIT 10;
 past the retention period right away, without the per-run limits and retry intervals that
 VACUUM applies. It returns the paths it deleted.
 
+Files written by transactions that did not commit, including `COPY ... TO` exports that failed
+or were rolled back, are tracked separately, and VACUUM removes them too.
+`lake_engine.flush_in_progress_queue()` removes them right away and returns their paths; files
+of transactions that are still running are left alone.
+
+The deletion queue and both functions are available to the `lake_write` role. To delete files
+that do not belong to a table, such as old exports, see
+[delete files](data-lake-import-export.md#delete-files).
+
 ## Recovering old data
 
 pg_lake does not have table-level restore yet. However, since old data and metadata files stay

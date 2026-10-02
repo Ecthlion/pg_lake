@@ -112,7 +112,7 @@ has the complete list.
 |:--|:--|
 | `location` | URL prefix for the table's data and metadata. Defaults to a path under `pg_lake_iceberg.default_location_prefix`. |
 | `partition_by` | Iceberg partition spec, such as `'day(event_time), bucket(16, user_id)'`. See [partitioning](iceberg-partitioning.md). |
-| `catalog` | Where the table is registered: `postgres` (default), `rest`, `object_store` or the name of an `iceberg_catalog` server. See [catalogs](iceberg-catalogs.md). |
+| `catalog` | Where the table is registered: `postgres` (default), `rest`, `object_store` or the name of a [catalog server](iceberg-catalogs.md#external-catalogs-with-create-server). See [catalogs](iceberg-catalogs.md). |
 | `autovacuum_enabled` | Whether the pg_lake autovacuum worker maintains this table. Default `true`. |
 | `max_snapshot_age` | Snapshot retention in seconds, overriding `pg_lake_iceberg.max_snapshot_age`. |
 | `out_of_range_values` | `error` (default) or `clamp` for values Iceberg cannot represent. See [data types](data-types.md#out-of-range-values). |

@@ -210,7 +210,7 @@ The extensions create these roles. Superusers have all of their privileges.
 | Role | Grants |
 |:--|:--|
 | `lake_read` | Reading files from URLs: foreign tables on the `pg_lake` server, `COPY ... FROM` a URL, `load_from` and `definition_from`, and the `lake_file` and `lake_file_cache` functions. |
-| `lake_write` | Writing files to URLs with `COPY ... TO`, the `lake_engine` maintenance functions, and creating `iceberg_catalog` servers. |
+| `lake_write` | Writing files to URLs with `COPY ... TO`, the `lake_engine` maintenance functions, and creating [catalog servers](iceberg-catalogs.md#external-catalogs-with-create-server). |
 | `lake_read_write` | Member of both roles above, and the only role with access to the `pg_lake_iceberg` server, so it is required to create Iceberg tables. |
 | `iceberg_catalog` | Read and write access to the `iceberg_tables` and `iceberg_namespace_properties` views, for external Iceberg clients that use PostgreSQL as their catalog. |
 

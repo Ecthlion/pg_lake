@@ -39,7 +39,7 @@ The query engine itself, pgduck_server, is configured with command-line options;
 | Parameter | Description |
 |:--|:--|
 | `pg_lake_iceberg.default_location_prefix`<span class="pglake-meta">Default none, set by superuser</span> | URL prefix under which new Iceberg tables store their files, such as `s3://bucket/iceberg`. |
-| `pg_lake_iceberg.default_catalog`<span class="pglake-meta">Default `postgres`, set by user</span> | Catalog for new Iceberg tables: `postgres`, `rest`, `object_store`, or an `iceberg_catalog` server name. |
+| `pg_lake_iceberg.default_catalog`<span class="pglake-meta">Default `postgres`, set by user</span> | Catalog for new Iceberg tables: `postgres`, `rest`, `object_store`, or the name of a [catalog server](iceberg-catalogs.md#external-catalogs-with-create-server). |
 | `pg_lake_iceberg.default_compatibility_mode`<span class="pglake-meta">Default `auto`, set by user</span> | `compatibility_mode` for new Iceberg tables: `auto` or `snowflake`. |
 | `pg_lake_iceberg.unsupported_numeric_as_double`<span class="pglake-meta">Default `on`, set by user</span> | Store unbounded `numeric` and `numeric` with precision above 38 as `double precision`. When `off`, such columns are rejected. |
 | `pg_lake_iceberg.max_snapshot_age`<span class="pglake-meta">Default `1800`, set by superuser</span> | Seconds to retain old snapshots before VACUUM expires them. Overridden per table by `max_snapshot_age`. |

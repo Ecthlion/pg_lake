@@ -35,9 +35,9 @@ accepts the same options.
 |:--|:--|
 | `location`<span class="pglake-meta">Default under `pg_lake_iceberg.default_location_prefix`; changes apply to new data files</span> | URL prefix for the table's data and metadata files. Changing it sends new data files to the new location, while metadata and existing files stay where they are. |
 | `partition_by`<span class="pglake-meta">Default none; can be changed</span> | Partition spec, a comma-separated list of transforms such as `'day(ts), bucket(16, id)'`. See [partitioning](iceberg-partitioning.md). |
-| `catalog`<span class="pglake-meta">Default `pg_lake_iceberg.default_catalog`; fixed at creation</span> | `postgres`, `rest`, `object_store`, or the name of an `iceberg_catalog` server. See [catalogs](iceberg-catalogs.md). |
-| `read_only`<span class="pglake-meta">Default `false`; fixed at creation</span> | Attach an existing table from a `rest` or `object_store` catalog for reading. |
-| `catalog_name`<span class="pglake-meta">Default database name; can be changed for read-only tables</span> | Catalog name of a read-only table. |
+| `catalog`<span class="pglake-meta">Default `pg_lake_iceberg.default_catalog`; fixed at creation</span> | `postgres`, `rest`, `object_store`, or the name of a [catalog server](iceberg-catalogs.md#external-catalogs-with-create-server). See [catalogs](iceberg-catalogs.md). |
+| `read_only`<span class="pglake-meta">Default `false`; fixed at creation</span> | Attach an existing table from a REST or `object_store` catalog for reading. See [query tables from an external catalog](iceberg-catalogs.md#query-tables-from-an-external-catalog). |
+| `catalog_name`<span class="pglake-meta">Default the catalog server's `catalog_name`, or the database name; can be changed for read-only tables</span> | Catalog name of a read-only table. |
 | `catalog_namespace`<span class="pglake-meta">Default schema name; can be changed for read-only tables</span> | Namespace of a read-only table. |
 | `catalog_table_name`<span class="pglake-meta">Default table name; can be changed for read-only tables</span> | Table name of a read-only table. |
 | `autovacuum_enabled`<span class="pglake-meta">Default `true`; can be changed</span> | Whether the autovacuum worker processes the table. |

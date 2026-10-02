@@ -180,7 +180,8 @@ Other engines can find the Iceberg table in three ways:
   `iceberg_tables.metadata_location`. Opening that file gives a fixed snapshot of the table.
 - **Through a REST catalog.** If the table is created in a REST catalog such as
   [Apache Polaris](https://polaris.apache.org/), every engine using that catalog sees each
-  commit. See [REST catalogs](iceberg-catalogs.md#rest-catalogs).
+  commit. Writing to an external catalog is still experimental; see
+  [REST catalogs](iceberg-catalogs.md#rest-catalogs).
 
 Other engines read the table, and pg_lake writes it. The data stays in one copy in
 object storage, and every engine sees the same, transactionally consistent snapshots.
@@ -347,8 +348,8 @@ ALTER ICEBERG TABLE iot_sensors_from_postgres
 
 If you would rather have Snowflake follow new commits on its own, register the table in an
 Iceberg REST catalog that both systems use, such as
-[Apache Polaris](https://polaris.apache.org/); see
-[REST catalogs](iceberg-catalogs.md#rest-catalogs).
+[Apache Polaris](https://polaris.apache.org/). Writing to an external catalog is still
+experimental; see [REST catalogs](iceberg-catalogs.md#rest-catalogs).
 
 #### Query from Snowflake
 

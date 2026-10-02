@@ -132,6 +132,10 @@ attach tables that other engines created there. It speaks the
 [Iceberg REST catalog protocol](https://iceberg.apache.org/rest-catalog-spec/) with OAuth2
 client credentials, and has been tested with [Apache Polaris](https://polaris.apache.org/).
 
+{: .note }
+Writing to an external catalog is still experimental. See
+[Create tables in an external catalog](#create-tables-in-an-external-catalog).
+
 There are two ways to connect to a REST catalog:
 
 - The built-in `rest` catalog is configured once by a superuser, and every database user shares
@@ -272,6 +276,10 @@ only to tables it created. To move existing data under pg_lake, create a new tab
 into it.
 
 ### Create tables in an external catalog
+
+{: .note }
+Writing to an external catalog is still experimental, both with catalog servers and with the
+built-in `rest` catalog.
 
 Without `read_only`, pg_lake creates the table in the catalog and owns it: it writes the data
 and metadata, and other engines can read it through the catalog.

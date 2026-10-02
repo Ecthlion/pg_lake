@@ -33,8 +33,8 @@ application --> sensor_readings                 heap table in PostgreSQL
 1. The application keeps writing to a heap table.
 2. [pg_incremental](https://github.com/CrunchyData/pg_incremental), which runs on
    [pg_cron](https://github.com/citusdata/pg_cron), periodically copies new rows into an
-   Iceberg table. It first backfills existing rows, then processes each new time range or
-   sequence range exactly once.
+   Iceberg table. It first backfills existing rows, then copies each new range of IDs exactly
+   once.
 3. Other engines read the Iceberg table where it is, and PostgreSQL remains the system of
    record.
 
@@ -95,38 +95,37 @@ will read the table, also add `compatibility_mode = 'snowflake'`, which cannot b
 
 ## Sync new rows automatically
 
-A time interval pipeline runs a command for each completed time range. `$1` and `$2` are the
-start and end of the range. Setting `start_time` to the oldest row makes the pipeline backfill
-all existing data when it is created; after that it runs every minute:
+A sequence pipeline runs a command for each new range of values from the table's identity
+column. `$1` and `$2` are the first and last value of the range. The pipeline copies all
+existing rows when it is created, and after that it runs every minute:
 
 ```sql
-SELECT incremental.create_time_interval_pipeline(
+SELECT incremental.create_sequence_pipeline(
   pipeline_name := 'sync-sensor-readings',
-  time_interval := '1 minute',
   source_table_name := 'sensor_readings',
-  start_time := (SELECT min(reading_time) FROM sensor_readings),
   command := $$
     INSERT INTO sensor_readings_iceberg
     SELECT * FROM sensor_readings
-    WHERE reading_time >= $1 AND reading_time < $2
+    WHERE reading_id BETWEEN $1 AND $2
   $$);
 
-NOTICE:  pipeline sync-sensor-readings: processing time range from 2026-07-02 10:24:17+00 to 2026-09-30 10:03:00+00
+NOTICE:  pipeline sync-sensor-readings: processing sequence values from 0 to 5000
 NOTICE:  pipeline sync-sensor-readings: scheduled cron job with ID 1 and schedule * * * * *
 ```
 
 pg_incremental records which ranges it has processed in the same transaction as the insert, so
-each range is copied exactly once, even if a run fails and is retried. With
-`source_table_name`, it also waits for in-progress writes to `sensor_readings` before processing
-a range, so rows that commit late are not skipped.
+each row is copied exactly once, even if a run fails and is retried. Before processing a range,
+it waits for transactions that are still writing to `sensor_readings`, so rows that commit late
+are not skipped. Because the IDs come from the database, rows are copied whatever their
+timestamps say, including rows that arrive with an old `reading_time`.
 
-New rows appear in the Iceberg table within about two minutes:
+New rows appear in the Iceberg table within about a minute:
 
 ```sql
 INSERT INTO sensor_readings (sensor_id, device_type, reading_time, temperature, humidity, battery_pct)
 SELECT (random() * 50)::int, 'hvac', now(), 20, 50, 90 FROM generate_series(1, 100);
 
--- two minutes later
+-- a minute later
 SELECT (SELECT count(*) FROM sensor_readings) AS heap_rows,
        (SELECT count(*) FROM sensor_readings_iceberg) AS iceberg_rows;
 
@@ -136,24 +135,32 @@ SELECT (SELECT count(*) FROM sensor_readings) AS heap_rows,
 ```
 
 Each pipeline run writes new Parquet files. [Autovacuum](iceberg-maintenance.md#autovacuum)
-compacts them in the background. Choose a longer `time_interval`, such as `'1 hour'`, if you do
-not need minute-level freshness; fewer, larger files are cheaper for both engines to read.
+compacts them in the background. Pass a less frequent `schedule`, such as `'0 * * * *'` for
+hourly, if you do not need minute-level freshness; fewer, larger files are cheaper for both
+engines to read.
 
-### Syncing by sequence instead of time
+### Syncing by time instead
 
-If your table has an identity or serial column, a sequence pipeline copies rows by ID range,
-which does not depend on timestamps being accurate:
+If the table has no identity or serial column, a time interval pipeline copies rows by time
+range instead. It processes each range once the range has passed, and `start_time` makes it
+backfill from the oldest row:
 
 ```sql
-SELECT incremental.create_sequence_pipeline(
-  pipeline_name := 'sync-orders',
-  source_table_name := 'orders',
+SELECT incremental.create_time_interval_pipeline(
+  pipeline_name := 'sync-sensor-readings-by-time',
+  time_interval := '1 minute',
+  source_table_name := 'sensor_readings',
+  start_time := (SELECT min(reading_time) FROM sensor_readings),
   command := $$
-    INSERT INTO orders_iceberg
-    SELECT * FROM orders
-    WHERE order_id BETWEEN $1 AND $2
+    INSERT INTO sensor_readings_iceberg
+    SELECT * FROM sensor_readings
+    WHERE reading_time >= $1 AND reading_time < $2
   $$);
 ```
+
+A row whose timestamp falls in a range that was already processed, for example a reading that
+a device uploads hours late, is not copied. Prefer a sequence pipeline when you can add an
+identity column.
 
 ### Updates and deletes
 

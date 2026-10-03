@@ -18,7 +18,16 @@ At a high level, `pg_lake` lets you:
 For example:
 
 ```sql
--- create an Iceberg table and load a public file with 3 million taxi trips
+-- create an Iceberg table
+CREATE TABLE measurements (
+  sensor_id int,
+  recorded_at timestamptz,
+  value double precision
+) USING iceberg;
+
+INSERT INTO measurements VALUES (1, now(), 21.5);
+
+-- or, create one from a file, here a public file with 3 million taxi trips
 CREATE TABLE trips () USING iceberg
   WITH (load_from = 'https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2024-01.parquet');
 
@@ -134,11 +143,9 @@ You can also set the credentials on `pgduck_server` for [local development with 
 You can create Iceberg tables by adding `USING iceberg` to your `CREATE TABLE` statements.
 
 ```sql
-CREATE TABLE iceberg_test USING iceberg 
-      AS SELECT 
-            i as key, 'val_'|| i  as val
-         FROM 
-            generate_series(0,99)i;
+CREATE TABLE iceberg_test USING iceberg
+AS SELECT i AS key, 'val_' || i AS val
+   FROM generate_series(0, 99) i;
 ```
 
 Then, query it:

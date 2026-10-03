@@ -1,19 +1,23 @@
-# pg_lake: Postgres for Iceberg and data lakes
+# pg_lake: Postgres for Iceberg and Data lakes
 
-`pg_lake` turns PostgreSQL into a lakehouse. Add `USING iceberg` to `CREATE TABLE` and you get a
-transactional table whose data is stored as Parquet files in object storage such as S3, in the
-open [Iceberg](https://iceberg.apache.org/) format that Spark, DuckDB, Snowflake and other engines
-can read too. The same extensions let you query and load raw Parquet, CSV and JSON files where
-they are, and export query results with `COPY`. Queries run on DuckDB's columnar engine, without
-leaving PostgreSQL.
+`pg_lake` integrates Iceberg and data lake files into Postgres. With the `pg_lake` extensions, you can use Postgres as a stand-alone lakehouse system that supports transactions and fast queries on Iceberg tables, and can directly work with raw data files in object stores like S3.
 
-**Documentation: [snowflake-labs.github.io/pg_lake](https://snowflake-labs.github.io/pg_lake/)**, with a
-[getting started guide](https://snowflake-labs.github.io/pg_lake/get-started.html), the user guide, use cases and reference pages.
+**Documentation: [snowflake-labs.github.io/pg_lake](https://snowflake-labs.github.io/pg_lake/)**, with a getting started guide, the user guide, use cases and reference pages.
+
+At a high level, `pg_lake` lets you:
+
+- **Create and modify [Iceberg](https://iceberg.apache.org/)** tables directly from PostgreSQL, with full transactional guarantees and query them from other engines
+- **Query and import data files in object storage** in [Parquet](https://parquet.apache.org/), CSV, JSON, and Iceberg format
+- **Export query results back to object storage** in Parquet, CSV, or JSON formats using COPY commands
+- **Read geospatial formats** supported by GDAL, such as GeoJSON and Shapefiles
+- **Use the built-in [map type](./pg_map/README.md)** for semi-structured or key–value data  
+- **Combine heap, Iceberg, and external Parquet/CSV/JSON** files in the same SQL queries and modifications — all with full transactional guarantees and no SQL limitations  
+- **Infer table columns and types** from external data sources such as Iceberg, Parquet, JSON, and CSV files
+- **Leverage DuckDB’s query engine** underneath for fast execution without leaving Postgres  
+
+For example:
 
 ```sql
-CREATE EXTENSION pg_lake CASCADE;
-SET pg_lake_iceberg.default_location_prefix TO 's3://mybucket/iceberg';
-
 -- create an Iceberg table and load a public file with 3 million taxi trips
 CREATE TABLE trips () USING iceberg
   WITH (load_from = 'https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2024-01.parquet');
@@ -30,85 +34,210 @@ CREATE FOREIGN TABLE clicks () SERVER pg_lake OPTIONS (path 's3://mybucket/click
 COPY (SELECT page, count(*) FROM clicks GROUP BY page) TO 's3://mybucket/reports/clicks.csv';
 ```
 
-## Features
+## Setting up `pg_lake`
 
-- **[Iceberg tables](https://snowflake-labs.github.io/pg_lake/iceberg-tables.html)** with `INSERT`, `UPDATE`, `DELETE`, `MERGE`,
-  transactions, hidden partitioning and automatic compaction and snapshot expiry
-- **[Interoperability](https://snowflake-labs.github.io/pg_lake/iceberg-catalogs.html)** with other engines, through PostgreSQL as
-  the Iceberg catalog, or an external Iceberg REST catalog such as Polaris
-- **[Query data lake files](https://snowflake-labs.github.io/pg_lake/query-data-lake-files.html)** in Parquet, CSV, JSON and
-  Iceberg format, in object storage or at public URLs, with wildcards and inferred columns
-- **[Import and export](https://snowflake-labs.github.io/pg_lake/data-lake-import-export.html)** with `COPY` to and from URLs,
-  including incremental loading of new files with
-  [pg_incremental](https://github.com/CrunchyData/pg_incremental)
-- **Mix heap tables, Iceberg tables and files** in the same queries and transactions, with no
-  SQL limitations
-- **[Geospatial](https://snowflake-labs.github.io/pg_lake/spatial.html)** formats supported by GDAL, such as GeoParquet, GeoJSON and
-  Shapefiles, with PostGIS
-- **A [map type](./pg_map/README.md)** for semi-structured and key-value data
+There are two ways to set up `pg_lake`:  
+- **Using Docker**, for an easy, ready-to-run test environment.  
+- **Building from source**, for a manual setup or development use.  
 
-See the [use cases](https://snowflake-labs.github.io/pg_lake/use-cases.html) for complete examples, such as syncing PostgreSQL tables
-to Iceberg and archiving old data.
+Both approaches include the PostgreSQL extensions, the `pgduck_server` application and setting up S3-compatible storage.
 
-## Getting started
+### Using Docker
 
-The quickest way to try pg_lake is Docker, which runs PostgreSQL with pg_lake, pgduck_server and
-S3-compatible storage:
+Follow the [Docker README](./docker/README.md) to set up and run `pg_lake` with Docker.
 
-```bash
-git clone https://github.com/Snowflake-Labs/pg_lake.git
-cd pg_lake/docker
-task compose:up
-psql -h localhost -p 5432 -U postgres
+
+### Building from source
+
+Once you’ve [built and installed the required components](./docs/building-from-source.md), you can initialize `pg_lake` inside Postgres.
+
+#### Creating the extensions
+
+Create all required extensions at once using `CASCADE`:
+
+```sql
+CREATE EXTENSION pg_lake CASCADE;
+NOTICE:  installing required extension "pg_lake_table"
+NOTICE:  installing required extension "pg_lake_engine"
+NOTICE:  installing required extension "pg_extension_base"
+NOTICE:  installing required extension "pg_lake_iceberg"
+NOTICE:  installing required extension "pg_lake_copy"
+CREATE EXTENSION
 ```
 
-See the [Docker README](./docker/README.md) for details. To add pg_lake to an existing
-PostgreSQL 16, 17, 18 or 19 installation, run `./install.sh` and follow
-[building from source](https://snowflake-labs.github.io/pg_lake/building-from-source.html). In short:
+#### Running `pgduck_server`
 
-1. Add `shared_preload_libraries = 'pg_extension_base'` to `postgresql.conf` and restart
-   PostgreSQL.
-2. Start `pgduck_server`, for example `pgduck_server --cache_dir /var/lib/pgduck/cache`. It uses
-   the usual AWS or GCP credential chain to reach object storage; see
-   [object storage credentials](https://snowflake-labs.github.io/pg_lake/configuration.html#object-storage-credentials) and the
-   [pgduck_server options](https://snowflake-labs.github.io/pg_lake/configuration.html#pgduck_server-options).
-3. Run `CREATE EXTENSION pg_lake CASCADE` and set `pg_lake_iceberg.default_location_prefix` to
-   the location where Iceberg tables should be stored.
+`pgduck_server` is a standalone process that implements the Postgres wire-protocol (locally), and underneath uses `DuckDB` to execute queries.
 
-The [getting started guide](https://snowflake-labs.github.io/pg_lake/get-started.html) then walks you through your first Iceberg
-table.
+When you run `pgduck_server` it starts listening to port `5332` on unix domain socket:
+```
+pgduck_server
+LOG pgduck_server is listening on unix_socket_directory: /tmp with port 5332, max_clients allowed 10000
+```
+
+As `pgduck_server` implements Postgres wire protocol, you can access it via `psql` on port `5332` and host `/tmp` and run commands via DuckDB. 
+
+For example, you can get the DuckDB version:
+
+```sql
+psql -p 5332 -h /tmp
+
+select version() as duckdb_version; 
+duckdb_version 
+---------------- 
+v1.3.2 (1 row)
+```
+
+You can also provide some additional settings while starting the server, to see all:
+```
+pgduck_server --help
+```
+
+There are some important settings that should be adjusted, especially on production systems:
+
+
+- `--memory_limit`: Optionally specify the maximum memory of pgduck_server similar to DuckDB's memory_limit, the default is 80 percent of the system memory
+- `--init_file_path <path>`: Execute all statements in this file on start-up
+- `--cache_dir`: Specify the directory to use to cache remote files (from S3)
+
+Note that if you want to make adjustments to duckdb settings, you can use the `--init_file_path` approach OR you can
+connect to the running pgduck_server and make changes. For example:
+
+```
+$ psql -h /tmp -p 5332
+psql (17.5, server 16.4.DuckPG)
+Type "help" for help.
+
+postgres=> set global threads = 16;
+SET
+```
+
+The connection above is to the pgduck_server on its port (default 5332), NOT to the postgres/pg_lake server. 
+
+
+#### Connecting `pg_lake` to s3 (or compatible)
+
+`pgduck_server` relies on the DuckDB [secrets manager](https://duckdb.org/docs/stable/configuration/secrets_manager) for credentials and it follows the credentials chain by default for AWS and GCP. Make sure your cloud credentials are configured properly — for example, by setting them in ~/.aws/credentials.  
+
+Once you set up the credential chain, you should set the `pg_lake_iceberg.default_location_prefix`. This is the location where Iceberg tables are stored:
+
+```sql
+SET pg_lake_iceberg.default_location_prefix TO 's3://testbucket/pglake';
+```
+
+You can also set the credentials on `pgduck_server` for [local development with `minio`](docs/building-from-source.md#running-s3-compatible-service-minio-locally).
+
+## Using pg_lake
+
+### Create an Iceberg table
+
+You can create Iceberg tables by adding `USING iceberg` to your `CREATE TABLE` statements.
+
+```sql
+CREATE TABLE iceberg_test USING iceberg 
+      AS SELECT 
+            i as key, 'val_'|| i  as val
+         FROM 
+            generate_series(0,99)i;
+```
+
+Then, query it:
+```sql
+SELECT count(*) FROM iceberg_test;
+ count 
+-------
+   100
+(1 row)
+```
+
+You can then see the Iceberg metadata location:
+
+```sql
+SELECT table_name, metadata_location FROM iceberg_tables;
+
+
+    table_name     |                                                metadata_location
+-------------------+--------------------------------------------------------------------------------------------------------------------
+ iceberg_test      | s3://testbucket/pglake/postgres/public/test/435029/metadata/00001-f0c6e20a-fd1c-4645-87c9-c0c64b92992b.metadata.json
+```
+
+### COPY to/from S3
+
+You can import or export data directly using `COPY` in **Parquet**, **CSV**, or **newline-delimited JSON** formats.  The format is automatically inferred from the file extension, or you can specify it explicitly with `COPY` options like `WITH (format 'csv', compression 'gzip')`.
+
+
+```sql
+-- Copy data from Postgres to S3 with format parquet
+-- Read from any data source, including iceberg tables, heap tables or any query results
+COPY (SELECT * FROM iceberg_test) TO 's3://testbucket/pglake/parquet_data/iceberg_test.parquet';
+
+-- Copy back from S3 to any table in Postgres
+-- This example copies into an iceberg table, but could be heap table as well
+COPY iceberg_test FROM 's3://testbucket/pglake/parquet_data/iceberg_test.parquet';
+```
+
+### Create foreign table for files on s3
+
+You can create a foreign table directly from a file or set of files without having to specify column names or types.
+
+```sql
+-- use the files under the path, can use * for all files
+CREATE FOREIGN TABLE parquet_table() 
+SERVER pg_lake 
+OPTIONS (path 's3://testbucket/pglake/parquet_data/*.parquet');
+
+-- note that we infer the columns from the file
+\d parquet_table
+              Foreign table "public.parquet_table"
+ Column |  Type   | Collation | Nullable | Default | FDW options 
+--------+---------+-----------+----------+---------+-------------
+ key    | integer |           |          |         | 
+ val    | text    |           |          |         | 
+Server: pg_lake
+FDW options: (path 's3://testbucket/pglake/parquet_data/*.parquet')
+
+-- and, query it
+select count(*) from parquet_table;
+ count 
+-------
+   100
+(1 row)
+
+```
 
 ## Architecture
 
 A `pg_lake` instance consists of two main components: **PostgreSQL with the pg_lake extensions** and **pgduck_server**.
 
-Users connect to PostgreSQL to run SQL queries, and the `pg_lake` extensions integrate with Postgres's hooks to handle query planning, transaction boundaries, and overall orchestration of execution.
+Users connect to PostgreSQL to run SQL queries, and the `pg_lake` extensions integrate with Postgres’s hooks to handle query planning, transaction boundaries, and overall orchestration of execution.  
 
-Behind the scenes, _parts_ of query execution are delegated to DuckDB through pgduck_server, a separate multi-threaded process that implements the PostgreSQL wire protocol (locally). This process runs DuckDB together with our **duckdb_pglake** extension, which adds PostgreSQL-compatible functions and behavior.
+Behind the scenes, _parts_ of query execution are delegated to DuckDB through pgduck_server, a separate multi-threaded process that implements the PostgreSQL wire protocol (locally).  This process runs DuckDB together with our **duckdb_pglake** extension, which adds PostgreSQL-compatible functions and behavior.  
 
-Users typically don't need to be aware of `pgduck_server`; it operates transparently to improve performance. When appropriate, `pg_lake` delegates scanning of the data and the computation to DuckDB's highly parallel, column-oriented execution engine.
+Users typically don’t need to be aware of `pgduck_server`; it operates transparently to improve performance. When appropriate, `pg_lake` delegates scanning of the data and the computation to DuckDB’s highly parallel, column-oriented execution engine.
 
-This separation also avoids the threading and memory-safety limitations that would arise from embedding DuckDB directly inside the Postgres process, which is designed around process isolation rather than multi-threaded execution. Moreover, it lets us interact with the query engine directly by connecting to it using standard Postgres clients. See [how pg_lake works](https://snowflake-labs.github.io/pg_lake/concepts.html) for more.
+This separation also avoids the threading and memory-safety limitations that would arise from embedding DuckDB directly inside the Postgres process, which is designed around process isolation rather than multi-threaded execution. Moreover, it lets us interact with the query engine directly by connecting to it using standard Postgres clients.
+
 
 ![pg_lake Architecture](pglake-arch.png)
 
+
 ### Components
 
-The team behind pg_lake has a lot of experience building Postgres extensions (e.g. Citus, pg_cron, pg_documentdb). Over time, we've learned that large, monolithic PostgreSQL extensions are harder to evolve and maintain.
+The team behind pg_lake has a lot of experience building Postgres extensions (e.g. Citus, pg_cron, pg_documentdb). Over time, we’ve learned that large, monolithic PostgreSQL extensions are harder to evolve and maintain.  
 
-`pg_lake` follows a modular design built around a **set of interoperating components**, mostly implemented as PostgreSQL extensions, others as supporting services or libraries. Each part focuses on a well-defined layer, such as table and metadata management, catalog and object store integration, query execution, or data format handling. This approach makes it easier to extend, test, and evolve the system, while keeping it familiar to anyone with a PostgreSQL background.
+`pg_lake` follows a modular design built around a **set of interoperating components** — mostly implemented as PostgreSQL extensions, others as supporting services or libraries.  
+Each part focuses on a well-defined layer, such as table and metadata management, catalog and object store integration, query execution, or data format handling.  This approach makes it easier to extend, test, and evolve the system, while keeping it familiar to anyone with a PostgreSQL background.
 
 The current set of components are:
 
 - **pg_lake_iceberg**: a PostgreSQL extension that implements the [Iceberg specification](https://iceberg.apache.org/)
-- **pg_lake_table**: a PostgreSQL extension that implements a foreign data wrapper to query files in object storage
+- **pg_lake_table**: a PostgreSQL extension that implements a foreign data wrapper to query files in object storage 
 - **pg_lake_copy**: a PostgreSQL extension that implements COPY to/from your data lake
-- **pg_lake_spatial**: a PostgreSQL extension that adds geospatial formats and PostGIS support
 - **pg_lake_engine**: a common module for different pg_lake extensions
-- **pg_extension_base**: a foundational building block for other extensions
-- **pg_extension_updater**: an extension for updating all extensions on start-up. See [README.md](./pg_extension_updater/README.md).
+- **pg_extension_base**: A foundational building block for other extensions
+- **pg_extension_updater**: An extension for updating all extensions on start-up. See [README.md](./pg_extension_updater/README.md).
 - **pg_lake_benchmark**: a PostgreSQL extension that performs various benchmarks on lake tables. See [README.md](./pg_lake_benchmark/README.md).
-- **pg_map**: a generic map type generator
+- **pg_map**: A generic map type generator
 - **pgduck_server**: a stand-alone server that loads DuckDB into the same server machine and exposes DuckDB via the PostgreSQL protocol
 - **duckdb_pglake**: a DuckDB extension that adds missing PostgreSQL functions to DuckDB
 
@@ -119,9 +248,10 @@ Next, we started building a comprehensive implementation of the Iceberg (v2) pro
 
 In June 2025, [Crunchy Data was acquired by Snowflake](https://www.crunchydata.com/blog/crunchy-data-joins-snowflake). Following the acquisition, Snowflake decided to open source the project as `pg_lake` in November 2025. The initial version is 3.0 because of the two prior generations. If you’re currently a Crunchy Data Warehouse user there will be an automatic upgrade path, though some names will change.
 
-## Contributing
+## Documentation
 
-Bug reports and pull requests are welcome. See [building from source](https://snowflake-labs.github.io/pg_lake/building-from-source.html) to set up a development environment and run the tests. The documentation sources are in the [docs](./docs) directory.
+The full documentation is at [snowflake-labs.github.io/pg_lake](https://snowflake-labs.github.io/pg_lake/). Its sources are in the [docs](./docs) directory.
+
 
 ## License
 Copyright (c) Snowflake Inc. All rights reserved.

@@ -610,6 +610,16 @@ AvroExtractNullableFieldFromRecordByIndex(avro_value_t * record, int index,
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("Failed to extract nullable field value %s", avro_strerror())));
 	}
+	/* Avro owns these buffers and reuses them on the next record. */
+	if (fieldType == AVRO_STRING || fieldType == AVRO_BYTES)
+	{
+		void	   *copy = palloc(Max(*valueLength, 1));
+
+		if (*valueLength > 0)
+			memcpy(copy, *value, *valueLength);
+		*value = copy;
+	}
+
 }
 
 /*

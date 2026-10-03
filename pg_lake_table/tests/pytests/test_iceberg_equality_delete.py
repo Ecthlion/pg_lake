@@ -9,7 +9,7 @@ import math
 import time
 import uuid
 from collections import Counter
-from datetime import date, datetime, time as daytime, timedelta
+from datetime import date, datetime, time as daytime, timedelta, timezone
 from decimal import Decimal
 
 import fastavro
@@ -43,6 +43,7 @@ ARROW_TYPES = {
     "timestamp": pa.timestamp("us"),
     "time": pa.time64("us"),
     "decimal(9,2)": pa.decimal128(9, 2),
+    "decimal(12,2)": pa.decimal128(12, 2),
 }
 
 
@@ -405,13 +406,19 @@ def delete_table(tmp_path, s3):
     return DeleteTable(tmp_path, s3)
 
 
-def attach(pg_conn, table):
+@pytest.fixture(autouse=True)
+def rollback_after_test(pg_conn):
+    yield
+    pg_conn.rollback()
+
+
+def attach(pg_conn, table, columns=""):
     path = table.finish()
     for file in table.directory.iterdir():
         table.s3.upload_file(str(file), TEST_BUCKET, f"{table.prefix}/{file.name}")
     path = table.file_url(path)
     run_command(
-        f"CREATE FOREIGN TABLE equality_test () SERVER pg_lake OPTIONS (path '{path}', format 'iceberg')",
+        f"CREATE FOREIGN TABLE equality_test ({columns}) SERVER pg_lake OPTIONS (path '{path}', format 'iceberg')",
         pg_conn,
     )
 
@@ -599,7 +606,14 @@ def test_position_overlap_and_same_commit(s3, pg_conn, extension, delete_table):
             Decimal("12.34"),
             Decimal("13.34"),
             "decimal(9,2)",
-            {"type": "bytes", "logicalType": "decimal", "precision": 9, "scale": 2},
+            {
+                "type": "fixed",
+                "name": "decimal_partition",
+                "size": 4,
+                "logicalType": "decimal",
+                "precision": 9,
+                "scale": 2,
+            },
         ),
         (True, False, "boolean", "boolean"),
         (float("nan"), 0.0, "float", "float"),
@@ -634,26 +648,156 @@ def test_partition_identity(
                 else partition
             )
             expected.append((1, "x", label, 1, projected))
-    deletion_value = 0.0 if value == 0.0 else value
     table.add(
         [(1,)],
         content=2,
         sequence=2,
         equality_ids=[1],
         spec=1,
-        partition={1000: deletion_value},
+        partition={1000: value},
     )
     attach(pg_conn, table)
     assert_paths(pg_conn, expected)
     pg_conn.rollback()
 
 
-def test_global_delete_and_partition_field_order(s3, pg_conn, extension, tmp_path):
+@pytest.mark.parametrize("kind", ["float", "double"])
+@pytest.mark.parametrize("delete_zero", [-0.0, 0.0], ids=["negative", "positive"])
+def test_partition_signed_zero(s3, pg_conn, extension, tmp_path, kind, delete_zero):
+    table = DeleteTable(
+        tmp_path,
+        s3,
+        fields=FIELDS + [(5, "p", kind)],
+        specs={1: [(5, 1000, "p", "identity", kind)]},
+    )
+    expected = []
+    for value, label in [(-0.0, "negative"), (0.0, "positive")]:
+        row = (1, "x", label, 1, value)
+        table.add([row], spec=1, partition={1000: value})
+        if math.copysign(1, value) != math.copysign(1, delete_zero):
+            expected.append(row)
+    table.add(
+        [(1,)],
+        content=2,
+        sequence=2,
+        equality_ids=[1],
+        spec=1,
+        partition={1000: delete_zero},
+    )
+    attach(pg_conn, table)
+    assert_paths(pg_conn, expected)
+    pg_conn.rollback()
+
+
+@pytest.mark.parametrize("data_date", [False, True])
+@pytest.mark.parametrize("delete_date", [False, True])
+def test_day_partition_encodings(
+    s3, pg_conn, extension, tmp_path, data_date, delete_date
+):
+    def day_type(use_date):
+        return {"type": "int", "logicalType": "date"} if use_date else "int"
+
+    table = DeleteTable(
+        tmp_path,
+        s3,
+        fields=FIELDS + [(5, "ts", "timestamp")],
+        specs={1: [(5, 1000, "ts_day", "day", day_type(data_date))]},
+    )
+    first = datetime(2024, 1, 1, 12)
+    second = first + timedelta(days=1)
+    day = (first.date() - date(1970, 1, 1)).days
+    table.add([(1, "x", "gone", 1, first)], spec=1, partition={1000: day})
+    survivor = (1, "x", "keep", 1, second)
+    table.add([survivor], spec=1, partition={1000: day + 1})
+    table.specs[1] = [(5, 1000, "ts_day", "day", day_type(delete_date))]
+    table.add(
+        [(1,)],
+        content=2,
+        sequence=2,
+        equality_ids=[1],
+        spec=1,
+        partition={1000: day},
+    )
+    attach(pg_conn, table)
+    assert_paths(pg_conn, [survivor])
+    pg_conn.rollback()
+
+
+@pytest.mark.parametrize("value", [None, Decimal("12.34")])
+@pytest.mark.parametrize("encoding", ["bytes", "fixed"])
+def test_decimal_partition_precision_promotion(
+    s3, pg_conn, extension, tmp_path, value, encoding
+):
+    def partition_type(precision, size):
+        return {
+            "type": encoding,
+            **(
+                {"name": "decimal_partition", "size": size}
+                if encoding == "fixed"
+                else {}
+            ),
+            "logicalType": "decimal",
+            "precision": precision,
+            "scale": 2,
+        }
+
+    fields = FIELDS + [(5, "p", "decimal(9,2)")]
+    table = DeleteTable(
+        tmp_path,
+        s3,
+        fields=fields,
+        specs={1: [(5, 1000, "p", "identity", partition_type(9, 4))]},
+    )
+    table.add([(1, "x", "gone", 1, value)], spec=1, partition={1000: value})
+    survivor = (1, "x", "keep", 1, Decimal("56.78"))
+    table.add([survivor], spec=1, partition={1000: survivor[-1]})
+    table.histories.append(
+        dict(
+            type="struct",
+            **{"schema-id": 1},
+            fields=[dict(id=i, name=n, type=t, required=False) for i, n, t in fields],
+        )
+    )
+    table.fields[-1] = (5, "p", "decimal(12,2)")
+    table.specs[1] = [(5, 1000, "p", "identity", partition_type(12, 6))]
+    table.add(
+        [(1,)],
+        content=2,
+        sequence=2,
+        equality_ids=[1],
+        spec=1,
+        partition={1000: value},
+    )
+    table.merge_manifests()
+    attach(pg_conn, table)
+    assert_paths(pg_conn, [survivor])
+    pg_conn.rollback()
+
+
+@pytest.mark.parametrize("with_delete", [False, True])
+def test_timetz_payload_conversion(s3, pg_conn, extension, tmp_path, with_delete):
+    table = DeleteTable(tmp_path, s3, fields=[(1, "id", "int"), (2, "at_time", "time")])
+    table.add([(1, daytime(8, 30)), (2, daytime(9, 30))])
+    expected = [(1, daytime(8, 30, tzinfo=timezone.utc))]
+    if with_delete:
+        table.add([(2,)], content=2, sequence=2, equality_ids=[1])
+    else:
+        expected.append((2, daytime(9, 30, tzinfo=timezone.utc)))
+    run_command("SET LOCAL TimeZone = 'Asia/Shanghai'", pg_conn)
+    attach(pg_conn, table, columns="id int, at_time timetz")
+    assert_paths(pg_conn, expected)
+    pg_conn.rollback()
+
+
+@pytest.mark.parametrize("void_type", [None, "string", "int"])
+def test_global_delete_and_partition_field_order(
+    s3, pg_conn, extension, tmp_path, void_type
+):
     table = DeleteTable(
         tmp_path,
         s3,
         specs={
-            0: [],
+            0: [] if void_type is None else [(2, 1002, "removed", "void", void_type)],
             1: [
                 (1, 1000, "a", "identity", "int"),
                 (2, 1001, "b", "identity", "string"),

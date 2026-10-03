@@ -467,7 +467,7 @@ IcebergAvroTypeFromString(const char *physicalTypeName, const char *logicalTypeN
 		type.physical_type = ICEBERG_AVRO_PHYSICAL_TYPE_STRING;
 		type.logical_type = ICEBERG_AVRO_LOGICAL_TYPE_NONE;
 	}
-	else if (strcmp(physicalTypeName, "bytes") == 0)
+	else if (strcmp(physicalTypeName, "bytes") == 0 || strcmp(physicalTypeName, "fixed") == 0)
 	{
 		type.physical_type = ICEBERG_AVRO_PHYSICAL_TYPE_BINARY;
 
@@ -502,6 +502,7 @@ IcebergAvroTypeFromString(const char *physicalTypeName, const char *logicalTypeN
 
 	if (strcmp(physicalTypeName, "int") != 0 && strcmp(physicalTypeName, "long") != 0 &&
 		strcmp(physicalTypeName, "string") != 0 && strcmp(physicalTypeName, "bytes") != 0 &&
+		strcmp(physicalTypeName, "fixed") != 0 &&
 		strcmp(physicalTypeName, "float") != 0 && strcmp(physicalTypeName, "double") != 0 &&
 		strcmp(physicalTypeName, "boolean") != 0)
 		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),

@@ -340,7 +340,9 @@ AppendEqualityReadGroups(StringInfo command, List *groups, int start, int count,
 	PgLakeEqualityDeleteReadGroup *group = list_nth(groups, start);
 	ReadDataStats stats = {0, 0};
 	List	   *paths = GetFileScanPathList(group->fileScans, &stats.sourceRowCount, false);
-	char	   *dataQuery = ReadDataSourceQuery(paths, positionDeletePaths, DATA_FORMAT_PARQUET,
+
+	/* Preserve Iceberg storage-to-surface conversions for non-key columns. */
+	char	   *dataQuery = ReadDataSourceQuery(paths, positionDeletePaths, DATA_FORMAT_ICEBERG,
 												DATA_COMPRESSION_INVALID, dataDesc, options,
 												schema, &stats, 0);
 

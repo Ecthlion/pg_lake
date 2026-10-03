@@ -692,8 +692,15 @@ position deletes. Equality keys are Iceberg field IDs, independent of column
 names or physical column order. Single and composite keys, NULL values, multiple
 key sets, and duplicate rows are supported. Deletes apply only to older data
 sequence numbers and matching partition specs and tuples; a delete written with
-an unpartitioned spec applies globally. Position deletes retain their existing
-behavior, including deletes of rows added in the same commit.
+an unpartitioned spec (including a spec containing only `void` transforms)
+applies globally. Position deletes retain their existing behavior, including
+deletes of rows added in the same commit.
+
+Partition matching preserves the distinction between positive and negative
+floating-point zero while treating all NaNs as equal. It accepts both `date`
+and legacy `int` encodings for `day` partitions, and decimal precision widening
+with unchanged scale, including Avro `fixed` decimal partition values.
+Avro named type references in partition schemas remain unsupported.
 
 Equality keys currently support top-level Iceberg `int`, `long`, and `string`
 fields (`integer`, `bigint`, and `text`). Renames, added nullable keys missing

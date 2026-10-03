@@ -49,6 +49,7 @@ typedef struct EqualityDeleteFile
 	DataFile   *file;
 	DataFileSchema *schema;
 	int			index;
+	bool		isGlobal;
 }			EqualityDeleteFile;
 
 typedef struct EqualityReadGroup
@@ -138,6 +139,8 @@ ValidatePartition(IcebergTableMetadata * metadata, DataFile * file)
 								   specField->field_id, file->file_path)));
 
 		bool		typeMatches = false;
+		bool		isDay = strcmp(specField->transform, "day") == 0;
+		bool		isVoid = strcmp(specField->transform, "void") == 0;
 
 		for (size_t s = 0; s < metadata->schemas_length; s++)
 		{
@@ -163,21 +166,45 @@ ValidatePartition(IcebergTableMetadata * metadata, DataFile * file)
 			transform.resultPgType = transform.pgType;
 			if (strcmp(specField->transform, "year") == 0 ||
 				strcmp(specField->transform, "month") == 0 ||
-				strcmp(specField->transform, "day") == 0 ||
 				strcmp(specField->transform, "hour") == 0 ||
 				strncmp(specField->transform, "bucket[", 7) == 0)
 				transform.resultPgType = MakePGType(INT4OID, -1);
+			else if (isDay)
+				transform.resultPgType = MakePGType(DATEOID, -1);
 			else if (strcmp(specField->transform, "identity") != 0 &&
 					 strcmp(specField->transform, "void") != 0 &&
 					 strncmp(specField->transform, "truncate[", 9) != 0)
 				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 								errmsg("unsupported equality delete partition transform %s", specField->transform)));
 			typeMatches |= AvroTypesEqual(field->value_type, GetTransformResultAvroType(&transform));
+
+			/*
+			 * day also permits legacy int; void permits int or the source
+			 * type.
+			 */
+			if (isDay || isVoid)
+			{
+				transform.resultPgType = MakePGType(INT4OID, -1);
+				typeMatches |= AvroTypesEqual(field->value_type, GetTransformResultAvroType(&transform));
+			}
 		}
 		if (!typeMatches)
 			ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
 							errmsg("partition field ID %d has an incompatible type in file \"%s\"",
 								   specField->field_id, file->file_path)));
+		/* Canonicalize equivalent encodings only after validating the spec. */
+		if (isVoid)
+		{
+			if (field->value != NULL)
+				ereport(ERROR, (errmsg("void partition field ID %d must be NULL in file \"%s\"",
+									   specField->field_id, file->file_path)));
+			field->value_type = (IcebergScalarAvroType)
+			{
+				0
+			};
+		}
+		else if (isDay)
+			field->value_type.logical_type = ICEBERG_AVRO_LOGICAL_TYPE_DATE;
 	}
 	return spec;
 }
@@ -192,8 +219,8 @@ AvroTypesEqual(IcebergScalarAvroType left, IcebergScalarAvroType right)
 
 /*
  * Normalize values for both hashing and equality. Iceberg considers all NaNs
- * equal and treats -0 as +0 for partition matching. Integer/float promotions
- * and redundant sign bytes of Avro decimals must not split equal partitions.
+ * equal but preserves the IEEE 754 distinction between -0 and +0. Type
+ * promotions and redundant decimal sign bytes must not split equal partitions.
  */
 static PartitionValue
 PartitionValueView(const PartitionField * field)
@@ -209,6 +236,8 @@ PartitionValueView(const PartitionField * field)
 		view.type.physical_type = ICEBERG_AVRO_PHYSICAL_TYPE_INT64;
 	else if (physical == ICEBERG_AVRO_PHYSICAL_TYPE_FLOAT)
 		view.type.physical_type = ICEBERG_AVRO_PHYSICAL_TYPE_DOUBLE;
+	if (view.type.logical_type == ICEBERG_AVRO_LOGICAL_TYPE_DECIMAL)
+		view.type.precision = 0;
 	if (field->value == NULL)
 		return view;
 	size_t		expectedLength = 0;
@@ -262,8 +291,6 @@ PartitionValueView(const PartitionField * field)
 			memcpy(&view.floating, view.bytes, sizeof(view.floating));
 		if (isnan(view.floating))
 			view.floating = NAN;
-		else if (view.floating == 0)
-			view.floating = 0;
 		view.type.physical_type = ICEBERG_AVRO_PHYSICAL_TYPE_DOUBLE;
 	}
 	else if (view.type.logical_type == ICEBERG_AVRO_LOGICAL_TYPE_DECIMAL)
@@ -465,7 +492,7 @@ AddCandidates(Bitmapset **mask, List *candidates, DataFile * dataFile)
 		DataFile   *file = deletion->file;
 
 		if (dataFile->data_sequence_number < file->data_sequence_number &&
-			(file->partition.fields_length == 0 ||
+			(deletion->isGlobal ||
 			 (dataFile->partition_spec_id == file->partition_spec_id &&
 			  PartitionsEqual(&dataFile->partition, &file->partition))))
 			*mask = bms_add_member(*mask, deletion->index);
@@ -527,7 +554,12 @@ PlanIcebergEqualityDeletes(IcebergTableMetadata * metadata, List *dataFiles,
 		deletePlans = lappend(deletePlans, plan);
 		IcebergPartitionSpec *spec = ValidatePartition(metadata, file);
 
-		if (spec->fields_length == 0)
+		/* Specs retaining only removed (void) fields are also unpartitioned. */
+		plan->isGlobal = true;
+		for (size_t i = 0; i < spec->fields_length; i++)
+			if (strcmp(spec->fields[i].transform, "void") != 0)
+				plan->isGlobal = false;
+		if (plan->isGlobal)
 			globalDeletes = lappend(globalDeletes, plan);
 		else
 		{

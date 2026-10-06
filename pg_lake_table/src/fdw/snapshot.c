@@ -656,6 +656,9 @@ static void
 ConvertIcebergDataFilesToFileScan(List *dataFiles, List *deleteFiles,
 								  List **fileScans, List **positionDeleteFileScans)
 {
+	if (dataFiles == NIL)
+		return;
+
 	ListCell   *dataFileCell = NULL;
 
 	foreach(dataFileCell, dataFiles)
@@ -676,7 +679,7 @@ ConvertIcebergDataFilesToFileScan(List *dataFiles, List *deleteFiles,
 	{
 		DataFile   *dataFile = lfirst(dataFileCell);
 
-		if (dataFile->content != ICEBERG_DATA_FILE_CONTENT_POSITION_DELETES || dataFiles == NIL)
+		if (dataFile->content != ICEBERG_DATA_FILE_CONTENT_POSITION_DELETES)
 			continue;
 
 		PgLakeFileScan *fileScan = palloc0(sizeof(PgLakeFileScan));

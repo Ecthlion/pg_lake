@@ -23,6 +23,7 @@
 #include "catalog/pg_type_d.h"
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "nodes/bitmapset.h"
+#include "pg_extension_base/pg_compat.h"
 #include "pg_lake/fdw/equality_delete.h"
 #include "pg_lake/fdw/partition_transform.h"
 #include "pg_lake/iceberg/api/table_schema.h"
@@ -662,15 +663,20 @@ PlanIcebergEqualityDeletes(IcebergTableMetadata * metadata, List *dataFiles,
 /*
  * Unlike old data files, a delete file must physically contain every declared
  * key. The ordinary schema reader fills missing columns with NULL, which here
- * could incorrectly delete real NULL keys. Inspect only the footer, once per
- * referenced file during read-query construction. Ordinary EXPLAIN can
- * inspect these footers but does not scan delete rows.
+ * could incorrectly delete real NULL keys. deleteScans is the per-file list
+ * from PlanIcebergEqualityDeletes: each entry deliberately has one path. The
+ * grouped, multi-path scans are used only for SQL generation, so linitial here
+ * does not skip other files sharing the same equality key schema. Inspect each
+ * referenced file's footer during read-query construction. Ordinary EXPLAIN
+ * can inspect these footers but does not scan delete rows.
  */
 void
 ValidateEqualityDeleteFiles(List *deleteScans)
 {
 	foreach_ptr(PgLakeEqualityDeleteScan, scan, deleteScans)
 	{
+		Assert(list_length(scan->paths) == 1);
+
 		const char *path = linitial(scan->paths);
 		char	   *query = psprintf("SELECT field_id, num_children, duckdb_type FROM parquet_schema(%s)", quote_literal_cstr(path));
 		PGDuckConnection *connection = GetPGDuckConnection();

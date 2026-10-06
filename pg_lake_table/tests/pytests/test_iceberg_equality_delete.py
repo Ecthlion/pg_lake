@@ -1218,8 +1218,14 @@ def test_malformed_required_manifest_fields(
     pg_conn.rollback()
 
 
-def test_incompatible_physical_key(s3, pg_conn, extension, delete_table):
+@pytest.mark.parametrize("valid_files", [0, 1])
+@pytest.mark.parametrize("pushdown", [True, False])
+def test_incompatible_physical_key(
+    s3, pg_conn, extension, delete_table, valid_files, pushdown
+):
     delete_table.add([(1, "x", "row", 1)])
+    for _ in range(valid_files):
+        delete_table.add([(2,)], content=2, sequence=2, equality_ids=[1])
     path = delete_table.add([(1,)], content=2, sequence=2, equality_ids=[1])
     physical = pq.read_table(path)
     pq.write_table(
@@ -1227,6 +1233,10 @@ def test_incompatible_physical_key(s3, pg_conn, extension, delete_table):
         path,
     )
     attach(pg_conn, delete_table)
+    run_command(
+        f"SET LOCAL pg_lake_table.enable_full_query_pushdown={str(pushdown).lower()}",
+        pg_conn,
+    )
     with pytest.raises(Exception, match="incompatible Parquet type"):
         run_query("SELECT * FROM equality_test", pg_conn)
     pg_conn.rollback()

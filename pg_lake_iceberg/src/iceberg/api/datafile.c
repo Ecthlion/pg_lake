@@ -21,6 +21,7 @@
 #include "libpq-fe.h"
 #include "miscadmin.h"
 
+#include "pg_extension_base/pg_compat.h"
 #include "pg_lake/extensions/pg_lake_iceberg.h"
 #include "pg_lake/iceberg/api/datafile.h"
 #include "pg_lake/iceberg/api/snapshot.h"

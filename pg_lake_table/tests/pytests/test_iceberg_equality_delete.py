@@ -981,8 +981,8 @@ def scale_engine_threads(pgduck_conn):
         "SELECT current_setting('enable_external_file_cache')", pgduck_conn
     )[0][0]
     run_command("SET GLOBAL threads=2", pgduck_conn)
-    # Production uses this cache by default. Repeated group references still
-    # execute readers; caching avoids exhausting local test HTTP connections.
+    # Repeated group references still execute readers. Enable caching here
+    # to avoid exhausting local test HTTP connections.
     run_command("SET GLOBAL enable_external_file_cache=true", pgduck_conn)
     yield
     run_command(f"SET GLOBAL threads={previous}", pgduck_conn)
@@ -1218,7 +1218,7 @@ def test_malformed_required_manifest_fields(
     pg_conn.rollback()
 
 
-@pytest.mark.parametrize("valid_files", [0, 1])
+@pytest.mark.parametrize("valid_files", [0, 1, 33])
 @pytest.mark.parametrize("pushdown", [True, False])
 def test_incompatible_physical_key(
     s3, pg_conn, extension, delete_table, valid_files, pushdown

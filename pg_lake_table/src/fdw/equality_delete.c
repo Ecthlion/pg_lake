@@ -77,6 +77,7 @@ static bool AvroTypesEqual(IcebergScalarAvroType left, IcebergScalarAvroType rig
 static DataFileSchema * EqualityKeySchema(IcebergTableMetadata * metadata, DataFile * file);
 static bool KeySchemasEqual(DataFileSchema * left, DataFileSchema * right);
 static void AddCandidates(Bitmapset **mask, List *candidates, DataFile * dataFile);
+static void ValidateEqualityDeleteFile(PGresult *result, PgLakeEqualityDeleteScan * scan, int startRow, int endRow);
 
 static DataFileSchemaField *
 FindTopLevelField(DataFileSchema * schema, int id)
@@ -666,69 +667,59 @@ PlanIcebergEqualityDeletes(IcebergTableMetadata * metadata, List *dataFiles,
  * could incorrectly delete real NULL keys. deleteScans is the per-file list
  * from PlanIcebergEqualityDeletes: each entry deliberately has one path. The
  * grouped, multi-path scans are used only for SQL generation, so linitial here
- * does not skip other files sharing the same equality key schema. Inspect each
- * referenced file's footer during read-query construction. Ordinary EXPLAIN
- * can inspect these footers but does not scan delete rows.
+ * does not skip other files sharing the same equality key schema.
+ *
+ * Batch footer queries to bound query size and reduce pgduck_server round trips.
+ * No delete rows are read, including during ordinary EXPLAIN.
  */
 void
 ValidateEqualityDeleteFiles(List *deleteScans)
 {
-	foreach_ptr(PgLakeEqualityDeleteScan, scan, deleteScans)
-	{
-		Assert(list_length(scan->paths) == 1);
+	ListCell   *cell = list_head(deleteScans);
 
-		const char *path = linitial(scan->paths);
-		char	   *query = psprintf("SELECT field_id, num_children, duckdb_type FROM parquet_schema(%s)", quote_literal_cstr(path));
+	while (cell != NULL)
+	{
+		PgLakeEqualityDeleteScan *scans[32];
+		int			nscans = 0;
+		StringInfo	query = makeStringInfo();
+
+		while (cell != NULL && nscans < lengthof(scans))
+		{
+			PgLakeEqualityDeleteScan *scan = lfirst(cell);
+
+			Assert(list_length(scan->paths) == 1);
+			if (nscans > 0)
+				appendStringInfoString(query, " UNION ALL ");
+
+			/* column_id is the footer's schema-tree index, not its field ID. */
+			appendStringInfo(query,
+							 "SELECT field_id, num_children, duckdb_type, %d AS file_index, "
+							 "column_id AS schema_index FROM parquet_schema(%s)",
+							 nscans, quote_literal_cstr(linitial(scan->paths)));
+			scans[nscans++] = scan;
+			cell = lnext(deleteScans, cell);
+		}
+		appendStringInfoString(query, " ORDER BY file_index, schema_index");
+
 		PGDuckConnection *connection = GetPGDuckConnection();
 		PGresult   *volatile result = NULL;
 
 		PG_TRY();
 		{
 			/* The FINALLY block owns both result and connection on errors. */
-			result = ExecuteQueryOnPGDuckConnection(connection, query);
+			result = ExecuteQueryOnPGDuckConnection(connection, query->data);
 			ThrowIfPGDuckResultHasError(connection, result);
+			int			row = 0;
 			int			rows = PQntuples(result);
-			int		   *remaining = palloc0(sizeof(int) * Max(rows, 1));
-			int			depth = 0;
-			int		   *counts = palloc0(sizeof(int) * scan->schema->nfields);
 
-			for (int row = 0; row < rows; row++)
+			for (int i = 0; i < nscans; i++)
 			{
-				while (depth > 0 && remaining[depth - 1] == 0)
-					depth--;
-				if (depth > 0)
-					remaining[depth - 1]--;
-				if (!PQgetisnull(result, row, 0))
-				{
-					int			id = atoi(PQgetvalue(result, row, 0));
+				int			startRow = row;
 
-					for (size_t i = 0; i < scan->schema->nfields; i++)
-						if (scan->schema->fields[i].id == id)
-						{
-							if (depth != 1 || !PQgetisnull(result, row, 1))
-								ereport(ERROR, (errmsg("equality field ID %d is not a top-level scalar in file \"%s\"", id, path)));
-							if (++counts[i] > 1)
-								ereport(ERROR, (errmsg("equality field ID %d is missing or duplicated in Parquet file \"%s\"", id, path)));
-							const char *type = PQgetvalue(result, row, 2);
-							const char *expected = scan->schema->fields[i].type->field.scalar.typeName;
-							bool		compatible = (strcmp(expected, "int") == 0 && strcmp(type, "INTEGER") == 0) ||
-								(strcmp(expected, "long") == 0 && (strcmp(type, "BIGINT") == 0 || strcmp(type, "INTEGER") == 0)) ||
-								(strcmp(expected, "string") == 0 && strcmp(type, "VARCHAR") == 0);
-
-							if (!compatible)
-								ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
-												errmsg("equality field ID %d has an incompatible Parquet type in file \"%s\"", id, path)));
-						}
-				}
-				if (!PQgetisnull(result, row, 1))
-					remaining[depth++] = atoi(PQgetvalue(result, row, 1));
+				while (row < rows && atoi(PQgetvalue(result, row, 3)) == i)
+					row++;
+				ValidateEqualityDeleteFile(result, scans[i], startRow, row);
 			}
-			for (size_t i = 0; i < scan->schema->nfields; i++)
-				if (counts[i] != 1)
-					ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
-									errmsg("equality field ID %d is missing or duplicated in Parquet file \"%s\"", scan->schema->fields[i].id, path)));
-			pfree(remaining);
-			pfree(counts);
 		}
 		PG_FINALLY();
 		{
@@ -736,5 +727,56 @@ ValidateEqualityDeleteFiles(List *deleteScans)
 			ReleasePGDuckConnection(connection);
 		}
 		PG_END_TRY();
+		pfree(query->data);
+		pfree(query);
 	}
+}
+
+/* Validate one complete footer, retaining the per-file error context. */
+static void
+ValidateEqualityDeleteFile(PGresult *result, PgLakeEqualityDeleteScan * scan,
+						   int startRow, int endRow)
+{
+	const char *path = linitial(scan->paths);
+	int		   *remaining = palloc0(sizeof(int) * Max(endRow - startRow, 1));
+	int			depth = 0;
+	int		   *counts = palloc0(sizeof(int) * scan->schema->nfields);
+
+	for (int row = startRow; row < endRow; row++)
+	{
+		while (depth > 0 && remaining[depth - 1] == 0)
+			depth--;
+		if (depth > 0)
+			remaining[depth - 1]--;
+		if (!PQgetisnull(result, row, 0))
+		{
+			int			id = atoi(PQgetvalue(result, row, 0));
+
+			for (size_t i = 0; i < scan->schema->nfields; i++)
+				if (scan->schema->fields[i].id == id)
+				{
+					if (depth != 1 || !PQgetisnull(result, row, 1))
+						ereport(ERROR, (errmsg("equality field ID %d is not a top-level scalar in file \"%s\"", id, path)));
+					if (++counts[i] > 1)
+						ereport(ERROR, (errmsg("equality field ID %d is missing or duplicated in Parquet file \"%s\"", id, path)));
+					const char *type = PQgetvalue(result, row, 2);
+					const char *expected = scan->schema->fields[i].type->field.scalar.typeName;
+					bool		compatible = (strcmp(expected, "int") == 0 && strcmp(type, "INTEGER") == 0) ||
+						(strcmp(expected, "long") == 0 && (strcmp(type, "BIGINT") == 0 || strcmp(type, "INTEGER") == 0)) ||
+						(strcmp(expected, "string") == 0 && strcmp(type, "VARCHAR") == 0);
+
+					if (!compatible)
+						ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+										errmsg("equality field ID %d has an incompatible Parquet type in file \"%s\"", id, path)));
+				}
+		}
+		if (!PQgetisnull(result, row, 1))
+			remaining[depth++] = atoi(PQgetvalue(result, row, 1));
+	}
+	for (size_t i = 0; i < scan->schema->nfields; i++)
+		if (counts[i] != 1)
+			ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+							errmsg("equality field ID %d is missing or duplicated in Parquet file \"%s\"", scan->schema->fields[i].id, path)));
+	pfree(remaining);
+	pfree(counts);
 }

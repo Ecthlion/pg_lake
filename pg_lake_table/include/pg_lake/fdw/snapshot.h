@@ -59,6 +59,9 @@ typedef struct PgLakeTableScan
 	List	   *equalityDeleteScans;
 	List	   *equalityDeleteReadGroups;
 
+	/* Successful footer validation is reusable for rescans of this snapshot. */
+	bool		equalityDeleteFilesValidated;
+
 	/* if we want to include child tables, a list of PgLakeTableScan */
 	List	   *childScans;
 

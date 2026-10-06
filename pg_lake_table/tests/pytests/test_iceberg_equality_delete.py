@@ -16,6 +16,8 @@ import fastavro
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from pyiceberg.transforms import BucketTransform
+from pyiceberg.types import IntegerType
 from utils_pytest import (
     TEST_BUCKET,
     fetch_data_files_used,
@@ -44,6 +46,7 @@ ARROW_TYPES = {
     "time": pa.time64("us"),
     "decimal(9,2)": pa.decimal128(9, 2),
     "decimal(12,2)": pa.decimal128(12, 2),
+    "uuid": pa.uuid(),
 }
 
 
@@ -456,7 +459,15 @@ def assert_paths(pg_conn, expected):
 
 
 @pytest.mark.parametrize("key,deleted", [(1, 2), (2, "b"), (4, 200)])
-def test_single_keys(s3, pg_conn, extension, delete_table, key, deleted):
+@pytest.mark.parametrize("validation", ["on", "off"])
+def test_single_keys(s3, pg_conn, extension, delete_table, key, deleted, validation):
+    assert run_query(
+        "SHOW pg_lake_table.enable_equality_delete_validation", pg_conn
+    ) == [["on"]]
+    run_command(
+        f"SET LOCAL pg_lake_table.enable_equality_delete_validation={validation}",
+        pg_conn,
+    )
     rows = [
         (1, "a", "duplicate", 100),
         (1, "a", "duplicate", 100),
@@ -659,6 +670,226 @@ def test_partition_identity(
     attach(pg_conn, table)
     assert_paths(pg_conn, expected)
     pg_conn.rollback()
+
+
+@pytest.mark.parametrize("kind", ["decimal(9,2)", "uuid"])
+@pytest.mark.parametrize("with_delete", [False, True])
+@pytest.mark.parametrize("qualified_name", [False, True])
+def test_named_partition_types(
+    s3, pg_conn, extension, tmp_path, kind, with_delete, qualified_name
+):
+    definition = {"type": "fixed", "name": "partition_key"}
+    reference = "partition_key"
+    if qualified_name:
+        definition["namespace"] = "test.partition"
+        reference = "test.partition.partition_key"
+    if kind == "uuid":
+        definition.update(size=16, logicalType="uuid")
+        first, second = uuid.UUID(int=1).bytes, uuid.UUID(int=2).bytes
+    else:
+        definition.update(size=4, logicalType="decimal", precision=9, scale=2)
+        first, second = Decimal("12.34"), Decimal("56.78")
+
+    table = DeleteTable(
+        tmp_path,
+        s3,
+        fields=FIELDS + [(5, "first", kind), (6, "second", kind)],
+        specs={
+            0: [
+                (5, 1000, "first", "identity", definition),
+                (6, 1001, "second", "identity", reference),
+            ]
+        },
+    )
+    rows = [(1, "x", "first", 1, first, first), (1, "x", "second", 1, first, second)]
+    for row in rows:
+        table.add([row], partition={1000: row[4], 1001: row[5]})
+    if with_delete:
+        table.add(
+            [(1,)],
+            content=2,
+            sequence=2,
+            equality_ids=[1],
+            partition={1000: first, 1001: first},
+        )
+    attach(pg_conn, table)
+    expected = rows[1:] if with_delete else rows
+    if kind == "uuid":
+        expected = [
+            (*row[:4], *(str(uuid.UUID(bytes=v)) for v in row[4:])) for row in expected
+        ]
+    assert_paths(pg_conn, expected)
+    pg_conn.rollback()
+
+
+def test_partition_spec_evolution(s3, pg_conn, extension, tmp_path):
+    timestamp = datetime(2024, 1, 1, 12)
+    day = (timestamp.date() - date(1970, 1, 1)).days
+    table = DeleteTable(
+        tmp_path,
+        s3,
+        fields=FIELDS + [(5, "ts", "timestamp")],
+        specs={
+            0: [(2, 1000, "category", "identity", "string")],
+            1: [(5, 1001, "ts_day", "day", "int")],
+            2: [],
+        },
+    )
+    rows = [(1, "a", label, 1, timestamp) for label in ("A", "B", "C", "D")]
+    table.add([rows[0]], spec=0, partition={1000: "a"})
+    rows[1] = (1, "b", "B", 1, timestamp)
+    table.add([rows[1]], spec=0, partition={1000: "b"})
+    table.add([rows[2]], spec=1, sequence=2, partition={1001: day})
+    table.add([rows[3]], spec=1, sequence=3, partition={1001: day})
+    table.add(
+        [(1,)], content=2, sequence=3, equality_ids=[1], spec=1, partition={1001: day}
+    )
+    attach(pg_conn, table)
+    # Only C has both the matching spec/partition and an older sequence.
+    assert_paths(pg_conn, [rows[0], rows[1], rows[3]])
+    pg_conn.rollback()
+
+    table.add([(1,)], content=2, sequence=4, equality_ids=[1], spec=2)
+    attach(pg_conn, table)
+    assert_paths(pg_conn, [])
+    pg_conn.rollback()
+
+
+@pytest.mark.parametrize(
+    "transform,kind,avro_type,first,second,partition,other_partition",
+    [
+        (
+            "year",
+            "timestamp",
+            "int",
+            datetime(2024, 1, 1),
+            datetime(2025, 1, 1),
+            54,
+            55,
+        ),
+        (
+            "month",
+            "timestamp",
+            "int",
+            datetime(2024, 1, 1),
+            datetime(2024, 2, 1),
+            648,
+            649,
+        ),
+        (
+            "hour",
+            "timestamp",
+            "int",
+            datetime(1970, 1, 1, 1),
+            datetime(1970, 1, 1, 2),
+            1,
+            2,
+        ),
+        ("bucket[4]", "int", "int", 34, 0, None, None),
+        ("truncate[2]", "string", "string", "abcd", "wxyz", "ab", "wx"),
+    ],
+)
+def test_partition_transforms(
+    s3,
+    pg_conn,
+    extension,
+    tmp_path,
+    transform,
+    kind,
+    avro_type,
+    first,
+    second,
+    partition,
+    other_partition,
+):
+    if transform == "bucket[4]":
+        bucket = BucketTransform(4).transform(IntegerType())
+        partition, other_partition = bucket(first), bucket(second)
+        assert partition != other_partition
+    table = DeleteTable(
+        tmp_path,
+        s3,
+        fields=FIELDS + [(5, "p", kind)],
+        specs={0: [(5, 1000, "part", transform, avro_type)]},
+    )
+    table.add([(1, "x", "gone", 1, first)], partition={1000: partition})
+    survivor = (1, "x", "keep", 1, second)
+    table.add([survivor], partition={1000: other_partition})
+    table.add(
+        [(1,)], content=2, sequence=2, equality_ids=[1], partition={1000: partition}
+    )
+    attach(pg_conn, table)
+    assert_paths(pg_conn, [survivor])
+    pg_conn.rollback()
+
+
+@pytest.mark.parametrize("invalid", [None, "unknown_spec", "data_tuple"])
+def test_empty_tuple_global_delete(s3, pg_conn, extension, tmp_path, invalid):
+    partition_fields = [(2, 1000, "category", "identity", "string")]
+    table = DeleteTable(tmp_path, s3, specs={0: partition_fields})
+    table.add([(1, "a", "old a", 1)], partition={1000: "a"})
+    table.add([(1, "b", "old b", 1)], partition={1000: "b"})
+    survivor = (1, "a", "same commit", 1)
+    table.add([survivor], sequence=2, partition={1000: "a"})
+
+    # Model PartitionSpec.unpartitioned(): empty tuple, spec ID 0, while the
+    # table's spec 0 is partitioned. Only the older rows should be deleted.
+    table.specs[0] = []
+    table.add([(1,)], content=2, sequence=2, equality_ids=[1])
+    if invalid == "unknown_spec":
+        table.manifests[-1]["partition_spec_id"] = 999
+    elif invalid == "data_tuple":
+        table.add([(2, "a", "invalid data partition", 2)])
+    table.specs[0] = partition_fields
+    if invalid is None:
+        attach(pg_conn, table)
+        assert_paths(pg_conn, [survivor])
+    else:
+        with pytest.raises(Exception, match="invalid partition spec or tuple"):
+            attach(pg_conn, table)
+            bag(pg_conn)
+    pg_conn.rollback()
+
+
+@pytest.mark.parametrize("field", ["data_file", "partition"])
+@pytest.mark.parametrize("missing", [False, True])
+def test_invalid_manifest_record_schema(
+    s3, pg_conn, extension, delete_table, field, missing
+):
+    delete_table.add([(1, "x", "row", 1)])
+    path = delete_table.directory / "manifest-0.avro"
+    with path.open("rb") as source:
+        reader = fastavro.reader(source)
+        schema = reader.writer_schema
+        records = list(reader)
+
+    parent_schema, parent_record = schema, records[0]
+    if field == "partition":
+        parent_schema = next(
+            f["type"] for f in schema["fields"] if f["name"] == "data_file"
+        )
+        parent_record = parent_record["data_file"]
+    if missing:
+        parent_schema["fields"] = [
+            f for f in parent_schema["fields"] if f["name"] != field
+        ]
+        del parent_record[field]
+    else:
+        next(f for f in parent_schema["fields"] if f["name"] == field)[
+            "type"
+        ] = "string"
+        parent_record[field] = "not a record"
+    with path.open("wb") as output:
+        fastavro.writer(output, schema, records)
+    delete_table.manifests[0]["manifest_length"] = path.stat().st_size
+    with pytest.raises(
+        Exception, match="(missing Iceberg manifest record field|must be a record)"
+    ):
+        attach(pg_conn, delete_table)
+        bag(pg_conn)
+    pg_conn.rollback()
+    # A malformed manifest must report an error without terminating the backend.
+    assert run_query("SELECT 1", pg_conn) == [[1]]
 
 
 @pytest.mark.parametrize("kind", ["float", "double"])
@@ -1158,6 +1389,75 @@ def test_invalid_partition_and_manifest(
     pg_conn.rollback()
 
 
+@pytest.mark.parametrize("pushdown", [True, False])
+def test_footer_validation_setting(s3, pg_conn, extension, delete_table, pushdown):
+    delete_table.add([(1, "x", "row", 1)])
+    delete_table.add(
+        [("x",)], content=2, sequence=2, equality_ids=[1], physical_ids=[2]
+    )
+    attach(pg_conn, delete_table)
+    run_command(
+        f"SET LOCAL pg_lake_table.enable_full_query_pushdown={str(pushdown).lower()}",
+        pg_conn,
+    )
+
+    # Default validation rejects the missing physical key even for EXPLAIN.
+    run_command("SAVEPOINT validation_setting", pg_conn)
+    with pytest.raises(Exception, match="missing or duplicated"):
+        run_query("EXPLAIN SELECT * FROM equality_test", pg_conn)
+    run_command("ROLLBACK TO SAVEPOINT validation_setting", pg_conn)
+
+    run_command(
+        "SET LOCAL pg_lake_table.enable_equality_delete_validation=off", pg_conn
+    )
+    run_query("EXPLAIN SELECT * FROM equality_test", pg_conn)
+
+    # Re-enabling validation must reject malformed files on subsequent scans.
+    run_command("SET LOCAL pg_lake_table.enable_equality_delete_validation=on", pg_conn)
+    with pytest.raises(Exception, match="missing or duplicated"):
+        run_query("EXPLAIN SELECT * FROM equality_test", pg_conn)
+    pg_conn.rollback()
+
+
+@pytest.mark.parametrize("nested_key", [False, True])
+@pytest.mark.parametrize("pushdown", [True, False])
+def test_physical_key_depth(s3, pg_conn, extension, delete_table, nested_key, pushdown):
+    rows = [(1, "x", "gone", 1), (2, "y", "keep", 2)]
+    delete_table.add(rows)
+    path = delete_table.add([(1,)], content=2, sequence=2, equality_ids=[1])
+    nested = pa.field(
+        "nested",
+        pa.struct(
+            [
+                pa.field(
+                    "child",
+                    pa.int32(),
+                    metadata={b"PARQUET:field_id": b"1" if nested_key else b"101"},
+                )
+            ]
+        ),
+        metadata={b"PARQUET:field_id": b"100"},
+    )
+    fields = [nested]
+    row = {"nested": {"child": 1}}
+    if not nested_key:
+        # A key after an unrelated struct must still be seen at root depth.
+        fields.append(pa.field("id", pa.int32(), metadata={b"PARQUET:field_id": b"1"}))
+        row["id"] = 1
+    pq.write_table(pa.Table.from_pylist([row], schema=pa.schema(fields)), path)
+    attach(pg_conn, delete_table)
+    run_command(
+        f"SET LOCAL pg_lake_table.enable_full_query_pushdown={str(pushdown).lower()}",
+        pg_conn,
+    )
+    if nested_key:
+        with pytest.raises(Exception, match="not a top-level scalar"):
+            bag(pg_conn)
+    else:
+        assert bag(pg_conn) == row_bag(rows[1:])
+    pg_conn.rollback()
+
+
 def test_duplicate_physical_key(s3, pg_conn, extension, delete_table):
     delete_table.add([(1, "x", "row", 1)])
     path = delete_table.add(
@@ -1243,7 +1543,12 @@ def test_incompatible_physical_key(
 
 
 @pytest.mark.parametrize("kind", ["double", "nested", "dropped", "historical_nested"])
-def test_unsupported_key_schema(s3, pg_conn, extension, delete_table, kind):
+@pytest.mark.parametrize("validation", ["on", "off"])
+def test_unsupported_key_schema(s3, pg_conn, extension, delete_table, kind, validation):
+    run_command(
+        f"SET LOCAL pg_lake_table.enable_equality_delete_validation={validation}",
+        pg_conn,
+    )
     delete_table.add([(1, "x", "row", 1)])
     delete_table.add([(1,)], content=2, sequence=2, equality_ids=[1])
     if kind == "double":

@@ -81,6 +81,9 @@ static void ReadIcebergManifestEntryFromAvro(avro_value_t * record, IcebergManif
 											 ManifestReaderContext * context);
 static HTAB *CreateManifestPartitionFieldMap(AvroReader * manifestReader);
 static IcebergScalarAvroType IcebergAvroTypeFromString(const char *physicalTypeName, const char *logicalTypeName);
+static avro_schema_t ManifestRecordFieldSchema(avro_schema_t parent, const char *fieldName);
+static PartitionFieldIdMapEntry * ReferencedPartitionField(avro_schema_t partitionSchema,
+														   const char *fieldName, HTAB *partitionFieldMap);
 
 
 /*
@@ -562,8 +565,9 @@ CreateManifestPartitionFieldMap(AvroReader * manifestReader)
 
 	/* 6) Finally unnest the partition's fields array */
 												 "partition_fields_unrolled AS ( "
-												 " SELECT jsonb_array_elements(partition_fields) AS part_field "
-												 " FROM partition_obj"
+												 " SELECT part_field, field_index "
+												 " FROM partition_obj, jsonb_array_elements(partition_fields) "
+												 " WITH ORDINALITY AS fields(part_field, field_index)"
 												 ") "
 
 	/*
@@ -585,7 +589,11 @@ CreateManifestPartitionFieldMap(AvroReader * manifestReader)
 												 "       part_field->'type'->1->>'logicalType' AS partition_field_logical_type "
 												 "       , part_field->'type'->1->>'precision' AS precision"
 												 "       , part_field->'type'->1->>'scale' AS scale "
-												 "FROM partition_fields_unrolled;");
+												 "FROM partition_fields_unrolled ORDER BY field_index;");
+
+	/* References must follow their definitions, as in the Avro schema. */
+	avro_schema_t dataFileSchema = ManifestRecordFieldSchema(manifestReader->dataSchema, "data_file");
+	avro_schema_t partitionSchema = ManifestRecordFieldSchema(dataFileSchema, "partition");
 
 	MemoryContext currentContext = CurrentMemoryContext;
 
@@ -712,6 +720,16 @@ CreateManifestPartitionFieldMap(AvroReader * manifestReader)
 							errmsg("duplicate partition field name %s", fieldName)));
 
 		entry->fieldId = atoi(fieldId);
+		PartitionFieldIdMapEntry *referencedField =
+			ReferencedPartitionField(partitionSchema, fieldName, partitionFieldMap);
+
+		if (referencedField != NULL)
+		{
+			/* Keep the definition's logical type, precision and scale too. */
+			entry->fieldType = referencedField->fieldType;
+			MemoryContextSwitchTo(spiContext);
+			continue;
+		}
 		entry->fieldType = IcebergAvroTypeFromString(physicalTypeName, logicalTypeName);
 		if (entry->fieldType.logical_type == ICEBERG_AVRO_LOGICAL_TYPE_DECIMAL)
 		{
@@ -731,6 +749,61 @@ CreateManifestPartitionFieldMap(AvroReader * manifestReader)
 	SPI_END();
 
 	return partitionFieldMap;
+}
+
+
+/* libavro's schema getters assume that the record and field exist. */
+static avro_schema_t
+ManifestRecordFieldSchema(avro_schema_t parent, const char *fieldName)
+{
+	int			fieldIndex = is_avro_record(parent) ?
+		avro_schema_record_field_get_index(parent, fieldName) : -1;
+
+	if (fieldIndex < 0)
+		ereport(ERROR, (errmsg("missing Iceberg manifest record field %s", fieldName)));
+	avro_schema_t schema = avro_schema_record_field_get_by_index(parent, fieldIndex);
+
+	if (!is_avro_record(schema))
+		ereport(ERROR, (errmsg("Iceberg manifest field %s must be a record", fieldName)));
+	return schema;
+}
+
+
+/*
+ * Reuse the type of the earlier partition field defining a named fixed type.
+ * Avro resolves names and namespaces for us; pointer identity avoids matching
+ * unrelated definitions with the same short name.
+ */
+static PartitionFieldIdMapEntry *
+ReferencedPartitionField(avro_schema_t partitionSchema, const char *fieldName,
+						 HTAB *partitionFieldMap)
+{
+	int			fieldIndex = avro_schema_record_field_get_index(partitionSchema, fieldName);
+
+	if (fieldIndex < 0)
+		ereport(ERROR, (errmsg("missing Iceberg partition field %s", fieldName)));
+	avro_schema_t fieldSchema = avro_schema_record_field_get_by_index(partitionSchema, fieldIndex);
+	avro_schema_t fieldType = is_avro_union(fieldSchema) ?
+		avro_schema_union_branch(fieldSchema, 1) : fieldSchema;
+
+	if (!is_avro_link(fieldType))
+		return NULL;
+	avro_schema_t target = avro_schema_link_target(fieldType);
+
+	for (size_t i = 0; i < avro_schema_record_size(partitionSchema); i++)
+	{
+		avro_schema_t candidate = avro_schema_record_field_get_by_index(partitionSchema, i);
+
+		if (is_avro_union(candidate))
+			candidate = avro_schema_union_branch(candidate, 1);
+		if (candidate == target)
+		{
+			const char *name = avro_schema_record_field_name(partitionSchema, i);
+
+			return hash_search(partitionFieldMap, name, HASH_FIND, NULL);
+		}
+	}
+	return NULL;
 }
 
 

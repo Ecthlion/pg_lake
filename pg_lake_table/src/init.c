@@ -32,6 +32,7 @@
 #include "pg_extension_base/extension_ids.h"
 #include "pg_lake/fdw/pg_lake_table.h"
 #include "pg_lake/fdw/data_file_pruning.h"
+#include "pg_lake/fdw/equality_delete.h"
 #include "pg_lake/fdw/shippable.h"
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/fdw/multi_data_file_dest.h"
@@ -140,6 +141,17 @@ _PG_init(void)
 							 false,
 							 PGC_USERSET,
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							 NULL,
+							 NULL,
+							 NULL);
+
+	DefineCustomBoolVariable("pg_lake_table.enable_equality_delete_validation",
+							 "Validates equality delete keys against Parquet file footers.",
+							 "Disable only when the external writer guarantees valid delete key columns.",
+							 &EnableEqualityDeleteValidation,
+							 true,
+							 PGC_USERSET,
+							 GUC_STANDARD,
 							 NULL,
 							 NULL,
 							 NULL);

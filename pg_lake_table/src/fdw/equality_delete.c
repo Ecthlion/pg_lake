@@ -32,6 +32,9 @@
 #include "utils/builtins.h"
 #include "utils/hsearch.h"
 
+/* pg_lake_table.enable_equality_delete_validation */
+bool		EnableEqualityDeleteValidation = true;
+
 /* Hashes only locate candidates. Every bucket has an exact comparison. */
 typedef struct DeleteCandidateBucket
 {
@@ -78,6 +81,7 @@ static DataFileSchema * EqualityKeySchema(IcebergTableMetadata * metadata, DataF
 static bool KeySchemasEqual(DataFileSchema * left, DataFileSchema * right);
 static void AddCandidates(Bitmapset **mask, List *candidates, DataFile * dataFile);
 static void ValidateEqualityDeleteFile(PGresult *result, PgLakeEqualityDeleteScan * scan, int startRow, int endRow);
+static bool EqualityDeleteKeyTypeMatches(const char *icebergType, const char *parquetType);
 
 static DataFileSchemaField *
 FindTopLevelField(DataFileSchema * schema, int id)
@@ -95,9 +99,10 @@ FindTopLevelField(DataFileSchema * schema, int id)
 }
 
 /*
- * The delete's own spec decides whether it is global. Names and Avro field
- * order are not partition identity. Validate against IDs and transform types
- * before using a partition for applicability.
+ * Validate against IDs and transform types before using a partition for
+ * applicability. Names and Avro field order are not partition identity.
+ * Empty equality-delete tuples are accepted as a global-delete compatibility
+ * case even when their spec ID names a partitioned spec.
  */
 static IcebergPartitionSpec *
 ValidatePartition(IcebergTableMetadata * metadata, DataFile * file)
@@ -113,9 +118,20 @@ ValidatePartition(IcebergTableMetadata * metadata, DataFile * file)
 			spec = &metadata->partition_specs[i];
 		}
 	}
-	if (spec == NULL || spec->fields_length != file->partition.fields_length)
+
+	/*
+	 * PartitionSpec.unpartitioned() can reuse spec ID 0 in a partitioned
+	 * table. An empty equality-delete tuple still denotes a global delete.
+	 * Data files and nonempty delete tuples must match the registered spec.
+	 */
+	bool		emptyEqualityDelete = file->content == ICEBERG_DATA_FILE_CONTENT_EQUALITY_DELETES &&
+		file->partition.fields_length == 0;
+
+	if (spec == NULL || (!emptyEqualityDelete && spec->fields_length != file->partition.fields_length))
 		ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
 						errmsg("invalid partition spec or tuple for file \"%s\"", file->file_path)));
+	if (emptyEqualityDelete)
+		return spec;
 
 	for (size_t i = 0; i < spec->fields_length; i++)
 	{
@@ -558,9 +574,12 @@ PlanIcebergEqualityDeletes(IcebergTableMetadata * metadata, List *dataFiles,
 
 		/* Specs retaining only removed (void) fields are also unpartitioned. */
 		plan->isGlobal = true;
-		for (size_t i = 0; i < spec->fields_length; i++)
-			if (strcmp(spec->fields[i].transform, "void") != 0)
-				plan->isGlobal = false;
+		if (file->partition.fields_length > 0)
+		{
+			for (size_t i = 0; i < spec->fields_length; i++)
+				if (strcmp(spec->fields[i].transform, "void") != 0)
+					plan->isGlobal = false;
+		}
 		if (plan->isGlobal)
 			globalDeletes = lappend(globalDeletes, plan);
 		else
@@ -738,45 +757,72 @@ ValidateEqualityDeleteFile(PGresult *result, PgLakeEqualityDeleteScan * scan,
 						   int startRow, int endRow)
 {
 	const char *path = linitial(scan->paths);
-	int		   *remaining = palloc0(sizeof(int) * Max(endRow - startRow, 1));
+	int		   *remainingChildren = palloc0(sizeof(int) * Max(endRow - startRow, 1));
 	int			depth = 0;
-	int		   *counts = palloc0(sizeof(int) * scan->schema->nfields);
+	int		   *keyOccurrences = palloc0(sizeof(int) * scan->schema->nfields);
 
 	for (int row = startRow; row < endRow; row++)
 	{
-		while (depth > 0 && remaining[depth - 1] == 0)
+		/*
+		 * parquet_schema emits the root and its descendants in preorder.
+		 * Track unfinished parents: depth 1 is a direct child of the root.
+		 * Visit non-key columns too, since they can contain nested fields.
+		 */
+		while (depth > 0 && remainingChildren[depth - 1] == 0)
 			depth--;
 		if (depth > 0)
-			remaining[depth - 1]--;
-		if (!PQgetisnull(result, row, 0))
+			remainingChildren[depth - 1]--;
+		int			fieldDepth = depth;
+		bool		isScalar = PQgetisnull(result, row, 1);
+
+		if (!isScalar)
+			remainingChildren[depth++] = atoi(PQgetvalue(result, row, 1));
+
+		/* Only declared equality keys need the checks below. */
+		if (PQgetisnull(result, row, 0))
+			continue;
+		int			id = atoi(PQgetvalue(result, row, 0));
+
+		for (size_t i = 0; i < scan->schema->nfields; i++)
 		{
-			int			id = atoi(PQgetvalue(result, row, 0));
+			DataFileSchemaField *key = &scan->schema->fields[i];
 
-			for (size_t i = 0; i < scan->schema->nfields; i++)
-				if (scan->schema->fields[i].id == id)
-				{
-					if (depth != 1 || !PQgetisnull(result, row, 1))
-						ereport(ERROR, (errmsg("equality field ID %d is not a top-level scalar in file \"%s\"", id, path)));
-					if (++counts[i] > 1)
-						ereport(ERROR, (errmsg("equality field ID %d is missing or duplicated in Parquet file \"%s\"", id, path)));
-					const char *type = PQgetvalue(result, row, 2);
-					const char *expected = scan->schema->fields[i].type->field.scalar.typeName;
-					bool		compatible = (strcmp(expected, "int") == 0 && strcmp(type, "INTEGER") == 0) ||
-						(strcmp(expected, "long") == 0 && (strcmp(type, "BIGINT") == 0 || strcmp(type, "INTEGER") == 0)) ||
-						(strcmp(expected, "string") == 0 && strcmp(type, "VARCHAR") == 0);
+			if (key->id != id)
+				continue;
+			/* Each key must occur once as a scalar directly under the root. */
+			if (fieldDepth != 1 || !isScalar)
+				ereport(ERROR, (errmsg("equality field ID %d is not a top-level scalar in file \"%s\"", id, path)));
+			if (++keyOccurrences[i] > 1)
+				ereport(ERROR, (errmsg("equality field ID %d is missing or duplicated in Parquet file \"%s\"", id, path)));
 
-					if (!compatible)
-						ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
-										errmsg("equality field ID %d has an incompatible Parquet type in file \"%s\"", id, path)));
-				}
+			const char *parquetType = PQgetvalue(result, row, 2);
+			const char *icebergType = key->type->field.scalar.typeName;
+
+			if (!EqualityDeleteKeyTypeMatches(icebergType, parquetType))
+				ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+								errmsg("equality field ID %d has an incompatible Parquet type in file \"%s\"", id, path)));
 		}
-		if (!PQgetisnull(result, row, 1))
-			remaining[depth++] = atoi(PQgetvalue(result, row, 1));
 	}
+
+	/* A missing key would otherwise be projected as NULL by the reader. */
 	for (size_t i = 0; i < scan->schema->nfields; i++)
-		if (counts[i] != 1)
+		if (keyOccurrences[i] != 1)
 			ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
 							errmsg("equality field ID %d is missing or duplicated in Parquet file \"%s\"", scan->schema->fields[i].id, path)));
-	pfree(remaining);
-	pfree(counts);
+	pfree(remainingChildren);
+	pfree(keyOccurrences);
+}
+
+
+/* Match the supported key types, including Iceberg's int-to-long promotion. */
+static bool
+EqualityDeleteKeyTypeMatches(const char *icebergType, const char *parquetType)
+{
+	if (strcmp(icebergType, "int") == 0)
+		return strcmp(parquetType, "INTEGER") == 0;
+	if (strcmp(icebergType, "long") == 0)
+		return strcmp(parquetType, "BIGINT") == 0 || strcmp(parquetType, "INTEGER") == 0;
+	if (strcmp(icebergType, "string") == 0)
+		return strcmp(parquetType, "VARCHAR") == 0;
+	return false;
 }

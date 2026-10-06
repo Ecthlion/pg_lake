@@ -236,7 +236,7 @@ BuildReadDataSourceQueryForTableScan(PgLakeTableScan * tableScan, bool skipFullM
 
 	if (tableScan->equalityDeleteReadGroups != NIL)
 	{
-		if (!tableScan->equalityDeleteFilesValidated)
+		if (EnableEqualityDeleteValidation && !tableScan->equalityDeleteFilesValidated)
 		{
 			ValidateEqualityDeleteFiles(tableScan->equalityDeleteScans);
 			tableScan->equalityDeleteFilesValidated = true;

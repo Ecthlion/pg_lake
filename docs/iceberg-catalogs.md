@@ -362,11 +362,16 @@ an unpartitioned spec (including a spec containing only `void` transforms)
 applies globally. Position deletes retain their existing behavior, including
 deletes of rows added in the same commit.
 
+For compatibility with writers using `PartitionSpec.unpartitioned()`, an equality
+delete with an empty partition tuple applies globally even if its registered
+spec ID names a partitioned spec. The spec ID must still exist in the table
+metadata, and the strict data sequence number rule still applies.
+
 Partition matching preserves the distinction between positive and negative
 floating-point zero while treating all NaNs as equal. It accepts both `date`
 and legacy `int` encodings for `day` partitions, and decimal precision widening
 with unchanged scale, including Avro `fixed` decimal partition values.
-Avro named type references in partition schemas remain unsupported.
+Avro named type references to earlier partition field definitions are supported.
 
 Equality keys currently support top-level Iceberg `int`, `long`, and `string`
 fields (`integer`, `bigint`, and `text`). Renames, added nullable keys missing
@@ -374,9 +379,9 @@ from older data files, and `int` to `long` promotion are supported. Dropped keys
 nested keys, other key types, and incompatible key type evolution are rejected
 with an error. These are pg_lake implementation limits, not Iceberg format
 requirements. Other table columns and partition fields retain their supported
-types. A delete file missing a declared key is rejected rather than projecting
-that key as NULL. Incompatible physical key types are also rejected. pg_lake
-does not write equality delete files.
+types. By default, a delete file missing a declared key is rejected rather than
+projecting that key as NULL. Incompatible physical key types are also rejected.
+pg_lake does not write equality delete files.
 
 Both query pushdown and Foreign Scan apply the same deletion rules, including
 when a query projects only non-key columns or uses `count(*)`. Plain `EXPLAIN`
@@ -384,6 +389,14 @@ does not scan delete contents, but may inspect file footers, as for other
 Parquet scans. Read-query construction validates referenced delete file footers
 through the existing file access and credential path. When pruning removes all
 data files, delete files are not opened.
+
+`pg_lake_table.enable_equality_delete_validation` defaults to `on`. Set it to
+`off` to skip the additional Parquet footer validation when the external writer
+guarantees valid delete key columns. Equality deletes still apply, and manifest
+and Iceberg schema validation remain enabled. With this check disabled, a
+malformed delete file with a missing key can silently produce incorrect results
+because the reader fills missing columns with NULL. This setting can be changed
+per session or transaction with `SET` or `SET LOCAL`.
 
 Planning indexes partition candidates and groups data files by their exact
 applicable delete set. Each group uses one anti join per equality key set;

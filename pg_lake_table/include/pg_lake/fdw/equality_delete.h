@@ -20,6 +20,8 @@
 #include "pg_lake/fdw/snapshot.h"
 #include "pg_lake/parquet/field.h"
 
+extern bool EnableEqualityDeleteValidation;
+
 /* Files with one canonical equality ID set, after applicability filtering. */
 typedef struct PgLakeEqualityDeleteScan
 {

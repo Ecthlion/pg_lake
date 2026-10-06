@@ -759,12 +759,10 @@ AvroGetUnionNotNullType(avro_value_t * unionValue)
 	avro_schema_t firstSchema = avro_schema_union_branch(schema, 0);
 	avro_schema_t otherSchema = avro_schema_union_branch(schema, 1);
 
-	if (is_avro_null(firstSchema))
-	{
-		return avro_typeof(otherSchema);
-	}
-	else
-	{
-		return avro_typeof(firstSchema);
-	}
+	avro_schema_t valueSchema = is_avro_null(firstSchema) ? otherSchema : firstSchema;
+
+	/* Named fixed references carry values of their target type. */
+	if (is_avro_link(valueSchema))
+		valueSchema = avro_schema_link_target(valueSchema);
+	return avro_typeof(valueSchema);
 }

@@ -90,6 +90,11 @@ static const struct config_enum_entry CompatibilityModeOptions[] = {
 void
 _PG_init(void)
 {
+	/*
+	 * Unlike pg_lake_engine, GUCs stay unregistered during pg_upgrade: the
+	 * restore replays ALTER ROLE/DATABASE SET before the iceberg_catalog
+	 * server that pg_lake_iceberg.default_catalog may name exists.
+	 */
 	if (IsBinaryUpgrade)
 	{
 		/*
@@ -134,10 +139,12 @@ _PG_init(void)
 	DefineCustomBoolVariable(
 							 "pg_lake_iceberg.enable_object_store_catalog",
 							 gettext_noop("Determines whether object storage catalog is enabled."),
-							 NULL,
+							 gettext_noop("Changing this requires a restart, which lets the "
+										  "catalog export worker exit for good when it is off "
+										  "instead of restarting to re-read the setting."),
 							 &EnableObjectStoreCatalog,
 							 true,
-							 PGC_SIGHUP,
+							 PGC_POSTMASTER,
 							 0,
 							 NULL, NULL, NULL);
 

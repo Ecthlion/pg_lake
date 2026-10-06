@@ -325,7 +325,9 @@ CreatePostgresColumnMappingsForIcebergTableFromExternalMetadata(Oid relationId)
 
 	char	   *currentMetadataPath = GetIcebergMetadataLocation(relationId, forUpdate);
 
-	DataFileSchema *schema = GetDataFileSchemaForExternalIcebergTable(currentMetadataPath);
+	DataFileSchema *schema =
+		GetDataFileSchemaForExternalIcebergTable(currentMetadataPath,
+												 LowercasesColumnNames(relationId));
 
 	Relation	rel = RelationIdGetRelation(relationId);
 	TupleDesc	tupDesc = RelationGetDescr(rel);
@@ -342,10 +344,11 @@ CreatePostgresColumnMappingsForIcebergTableFromExternalMetadata(Oid relationId)
 		columnMapping->field = field;
 
 		columnMapping->attrNum = get_attnum(relationId, field->name);
-		if (icebergCatalogType == REST_CATALOG_READ_ONLY && columnMapping->attrNum == InvalidAttrNumber)
+		if (icebergCatalogType == REST_CATALOG_READ_ONLY && columnMapping->attrNum <= InvalidAttrNumber)
 		{
 			/*
-			 * If no such column exists, skip.
+			 * If no such user column exists, skip. System columns have
+			 * negative attnums.
 			 */
 			continue;
 		}
@@ -362,7 +365,7 @@ CreatePostgresColumnMappingsForIcebergTableFromExternalMetadata(Oid relationId)
 		 * TupleDescAttr(InvalidAttrNumber - 1), which trips PG19's new bounds
 		 * Assert in TupleDescAttr().
 		 */
-		if (columnMapping->attrNum != InvalidAttrNumber)
+		if (columnMapping->attrNum > InvalidAttrNumber)
 		{
 			Form_pg_attribute attr = TupleDescAttr(tupDesc, columnMapping->attrNum - 1);
 
@@ -413,7 +416,8 @@ GetDataFileSchemaForTableInternal(Oid relationId)
 
 		char	   *path = GetIcebergMetadataLocation(relationId, false);
 
-		return GetDataFileSchemaForExternalIcebergTable(path);
+		return GetDataFileSchemaForExternalIcebergTable(path,
+														LowercasesColumnNames(relationId));
 	}
 }
 
@@ -430,12 +434,16 @@ GetDataFileSchemaForTable(Oid relationId)
 
 /*
  * GetDataFileSchemaForExternalIcebergTable gets a table schema field based
- * on the current Iceberg metadata.
+ * on the current Iceberg metadata, with names lowercased if requested.
  */
 DataFileSchema *
-GetDataFileSchemaForExternalIcebergTable(char *metadataPath)
+GetDataFileSchemaForExternalIcebergTable(char *metadataPath, bool lowercaseNames)
 {
 	IcebergTableMetadata *metadata = ReadIcebergTableMetadata(metadataPath);
+
+	if (lowercaseNames)
+		LowercaseIcebergTableMetadataNames(metadata);
+
 	IcebergTableSchema *icebergSchema = GetCurrentIcebergTableSchema(metadata);
 
 	DataFileSchema *schema = palloc0(sizeof(DataFileSchema));

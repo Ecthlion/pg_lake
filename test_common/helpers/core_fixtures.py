@@ -18,6 +18,7 @@ from .cloud_storage import (
 from .db import (
     open_pg_conn,
     run_command,
+    run_command_retrying_deadlock,
     run_query,
 )
 from .server import (
@@ -230,11 +231,19 @@ def extension(superuser_conn, pg_conn, app_user):
 
     pg_conn.rollback()
     superuser_conn.rollback()
-    run_command(
-        f"""
-        DROP EXTENSION pg_lake_table CASCADE;
-    """,
-        superuser_conn,
+    # The pg_lake autovacuum worker writes to the extension's own tables while
+    # it drains the deletion queue, and takes those locks in the opposite
+    # order to DROP EXTENSION, so the DROP can lose a deadlock:
+    #
+    #   Process 18784 waits for AccessExclusiveLock on relation 16521 of
+    #   database 16384; blocked by process 18790.
+    #   Process 18790 waits for RowExclusiveLock on relation 26599 of
+    #   database 16384; blocked by process 18784.
+    #   Process 18784: DROP EXTENSION pg_lake_table CASCADE;
+    #
+    # A worker pass is bounded, so retrying is what the error asks for.
+    run_command_retrying_deadlock(
+        "DROP EXTENSION pg_lake_table CASCADE;", superuser_conn
     )
     superuser_conn.commit()
 

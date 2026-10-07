@@ -270,13 +270,13 @@ CREATE TABLE analytics.customers () USING iceberg
 WITH (catalog = 'sales_catalog', read_only = true);
 ```
 
+For equality-delete support and its limitations, see
+[Reading external equality deletes](#reading-external-equality-deletes).
+
 Attached tables cannot be written to. Writing would mean taking over the table's metadata,
 field IDs and file inventory from whatever produced them, which pg_lake does not do: it writes
 only to tables it created. To move existing data under pg_lake, create a new table and copy
 into it.
-
-For equality-delete support and its limitations, see
-[Reading external equality deletes](#reading-external-equality-deletes).
 
 ### Create tables in an external catalog
 

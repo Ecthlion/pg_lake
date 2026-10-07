@@ -1559,6 +1559,12 @@ PgExtensionBaseDatabaseStarterMain(Datum databaseIdDatum)
 
 	while (!TerminationRequested)
 	{
+		/*
+		 * Tests park a starter here to hold it in the main loop, where it
+		 * reads the registrations without the lock it took above.
+		 */
+		INJECTION_POINT_COMPAT("database-starter-in-main-loop");
+
 		/* read pg_extension_base.workers contents */
 		List	   *workerRegistrationList = GetBaseWorkerRegistrationList();
 
@@ -2420,6 +2426,23 @@ PgExtensionBaseWorkerMain(Datum arg)
 
 	StartTransactionCommand();
 
+	/*
+	 * A starter may launch us from a stale registration list. Wait for any
+	 * in-progress deregistration before checking our registration; a later
+	 * one sees our PID after this lock is released and signals us.
+	 *
+	 * Lock the workers table first, the order register, deregister and DROP
+	 * EXTENSION pg_extension_base use, to avoid deadlocking with them.
+	 */
+	Oid			workerTableId = PgExtensionBaseWorkersRelationId();
+
+	if (OidIsValid(workerTableId))
+		LockRelationOid(workerTableId, AccessShareLock);
+
+	bool		waitForLock = true;
+
+	LockDatabaseStarter(databaseId, RowExclusiveLock, waitForLock);
+
 	char	   *databaseName = get_database_name(databaseId);
 
 	char	   *extensionName = get_extension_name(extensionId);
@@ -2427,9 +2450,10 @@ PgExtensionBaseWorkerMain(Datum arg)
 	if (extensionName == NULL || !IsWorkerRegistered(workerId))
 	{
 		/*
-		 * The extension was dropped just after the base worker started. The
-		 * worker registration is permanently gone, so we can remove it from
-		 * the hash.
+		 * The extension was dropped just after the base worker started, or
+		 * our registration was deleted by a deregister we waited for above.
+		 * The worker registration is permanently gone, so we can remove it
+		 * from the hash.
 		 */
 
 		RemoveBaseWorkerEntry(databaseId, workerId);
@@ -2831,6 +2855,12 @@ DeregisterBaseWorker_internal(int32 workerId)
 		/*
 		 * Block the database starter on start-up, such that it waits for us
 		 * to commit before reading from the database.
+		 *
+		 * That only covers a starter that has yet to reach its main loop; one
+		 * already in it reads the registrations without the lock and can
+		 * launch a replacement.  The base worker takes the lock too, before
+		 * checking whether it is still registered, which is what makes such a
+		 * replacement harmless.
 		 */
 		LockDatabaseStarter(MyDatabaseId, ShareLock, waitForLock);
 		DatabaseStarterNeedsRestart(MyDatabaseId);

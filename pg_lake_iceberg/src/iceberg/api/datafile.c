@@ -21,6 +21,7 @@
 #include "libpq-fe.h"
 #include "miscadmin.h"
 
+#include "pg_extension_base/pg_compat.h"
 #include "pg_lake/extensions/pg_lake_iceberg.h"
 #include "pg_lake/iceberg/api/datafile.h"
 #include "pg_lake/iceberg/api/snapshot.h"
@@ -116,8 +117,27 @@ FetchAllDataAndDeleteFilesFromCurrentSnapshot(IcebergTableMetadata * metadata, L
 
 	IcebergSnapshot *snapshot = GetCurrentSnapshot(metadata, true);
 
-	*dataFiles = FetchDataFilesFromSnapshot(snapshot, IsManifestOfFileContentAdd, IsManifestEntryStatusScannable, NULL);
-	*deleteFiles = FetchDataFilesFromSnapshot(snapshot, IsManifestOfFileContentDeletes, IsManifestEntryStatusScannable, NULL);
+	/* Read the manifest list once and retain its sequence/spec context. */
+	foreach_ptr(IcebergManifest, manifest, FetchManifestsFromSnapshot(snapshot, NULL))
+	{
+		if (manifest->sequence_number > snapshot->sequence_number)
+			ereport(ERROR, (errmsg("invalid Iceberg manifest sequence number in %s", manifest->manifest_path)));
+		List	   *files = FetchDataFilesFromManifest(manifest, false,
+													   IsManifestEntryStatusScannable, NULL);
+
+		foreach_ptr(DataFile, file, files)
+		{
+			if ((manifest->content == ICEBERG_MANIFEST_FILE_CONTENT_DATA) !=
+				(file->content == ICEBERG_DATA_FILE_CONTENT_DATA))
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_EXCEPTION),
+						 errmsg("Iceberg manifest content does not match file \"%s\"", file->file_path)));
+		}
+		if (manifest->content == ICEBERG_MANIFEST_FILE_CONTENT_DATA)
+			*dataFiles = list_concat(*dataFiles, files);
+		else
+			*deleteFiles = list_concat(*deleteFiles, files);
+	}
 }
 
 /*
@@ -174,6 +194,25 @@ FetchDataFilesFromManifest(IcebergManifest * manifest, bool pathOnly, ManifestEn
 	foreach(manifestEntryCell, manifestEntries)
 	{
 		IcebergManifestEntry *manifestEntry = lfirst(manifestEntryCell);
+
+		/* File sequence numbers describe file creation, not delete ordering. */
+		if (!manifestEntry->has_sequence_number &&
+			manifestEntry->status == ICEBERG_MANIFEST_ENTRY_STATUS_EXISTING)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("missing data sequence number for existing file \"%s\"",
+							manifestEntry->data_file.file_path)));
+
+		DataFile   *file = &manifestEntry->data_file;
+
+		file->data_sequence_number = manifestEntry->has_sequence_number ?
+			manifestEntry->sequence_number : manifest->sequence_number;
+		file->partition_spec_id = manifest->partition_spec_id;
+		if (file->data_sequence_number < 0 || manifest->sequence_number < 0 ||
+			file->data_sequence_number > manifest->sequence_number)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("invalid data sequence number for file \"%s\"", file->file_path)));
 
 		if (dataFilePredicateFn == NULL || dataFilePredicateFn(&manifestEntry->data_file))
 		{

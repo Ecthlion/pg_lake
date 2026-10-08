@@ -568,6 +568,10 @@ AvroExtractNullableFieldFromRecordByIndex(avro_value_t * record, int index,
 	{
 		rc = avro_value_get_bytes(&fieldValue, (const void **) value, valueLength);
 	}
+	else if (fieldType == AVRO_FIXED)
+	{
+		rc = avro_value_get_fixed(&fieldValue, (const void **) value, valueLength);
+	}
 	else if (fieldType == AVRO_FLOAT)
 	{
 		*value = palloc0(sizeof(float));
@@ -611,6 +615,16 @@ AvroExtractNullableFieldFromRecordByIndex(avro_value_t * record, int index,
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("Failed to extract nullable field value %s", avro_strerror())));
 	}
+	/* Avro owns these buffers and reuses them on the next record. */
+	if (fieldType == AVRO_STRING || fieldType == AVRO_BYTES || fieldType == AVRO_FIXED)
+	{
+		void	   *copy = palloc(Max(*valueLength, 1));
+
+		if (*valueLength > 0)
+			memcpy(copy, *value, *valueLength);
+		*value = copy;
+	}
+
 }
 
 /*
@@ -767,12 +781,10 @@ AvroGetUnionNotNullType(avro_value_t * unionValue)
 	avro_schema_t firstSchema = avro_schema_union_branch(schema, 0);
 	avro_schema_t otherSchema = avro_schema_union_branch(schema, 1);
 
-	if (is_avro_null(firstSchema))
-	{
-		return avro_typeof(otherSchema);
-	}
-	else
-	{
-		return avro_typeof(firstSchema);
-	}
+	avro_schema_t valueSchema = is_avro_null(firstSchema) ? otherSchema : firstSchema;
+
+	/* Named fixed references carry values of their target type. */
+	if (is_avro_link(valueSchema))
+		valueSchema = avro_schema_link_target(valueSchema);
+	return avro_typeof(valueSchema);
 }

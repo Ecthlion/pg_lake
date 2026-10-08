@@ -1019,8 +1019,17 @@ ErrorIfIcebergMetadataIsOutOfSync(Oid relationId, List *fileScans,
 	List	   *icebergMetadataFileScans = NIL;
 	List	   *icebergPositionDeleteFileScans = NIL;
 
-	CreateTableScanForIcebergMetadata(relationId, metadata, NIL, &icebergMetadataFileScans, &icebergPositionDeleteFileScans);
+	List	   *equalityDeleteScans = NIL;
+	List	   *equalityDeleteReadGroups = NIL;
 
+	CreateTableScanForIcebergMetadata(relationId, metadata, NIL, &icebergMetadataFileScans, &icebergPositionDeleteFileScans,
+									  &equalityDeleteScans, &equalityDeleteReadGroups);
+
+	/*
+	 * This check compares files mirrored in the internal catalog. Equality
+	 * deletes are supported only for external read-only tables, so their
+	 * plans are not covered by this catalog comparison.
+	 */
 	ErrorIfScanListsAreNotEqual(icebergMetadataFileScans, fileScans, "fileScan");
 	ErrorIfScanListsAreNotEqual(icebergPositionDeleteFileScans, positionDeleteScans, "posDeleteScan");
 }

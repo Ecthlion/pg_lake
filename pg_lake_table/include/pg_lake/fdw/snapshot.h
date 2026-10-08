@@ -55,6 +55,13 @@ typedef struct PgLakeTableScan
 	/* list of PgLakeFileScan for position delete files */
 	List	   *positionDeleteScans;
 
+	/* Equality scan structures are defined in equality_delete.h. */
+	List	   *equalityDeleteScans;
+	List	   *equalityDeleteReadGroups;
+
+	/* Successful footer validation is reusable for rescans of this snapshot. */
+	bool		equalityDeleteFilesValidated;
+
 	/* if we want to include child tables, a list of PgLakeTableScan */
 	List	   *childScans;
 
@@ -83,4 +90,6 @@ extern PGDLLEXPORT void CreateTableScanForIcebergMetadata(Oid relationId,
 														  IcebergTableMetadata * metadata,
 														  List *baseRestrictInfoList,
 														  List **fileScans,
-														  List **positionDeleteScans);
+														  List **positionDeleteScans,
+														  List **equalityDeleteScans,
+														  List **equalityDeleteReadGroups);

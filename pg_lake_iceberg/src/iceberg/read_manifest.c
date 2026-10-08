@@ -67,6 +67,7 @@ typedef struct ManifestReaderContext
 {
 	/* partition field name => field id mapping */
 	HTAB	   *partitionFieldMap;
+	bool		isV1Manifest;
 }			ManifestReaderContext;
 
 
@@ -80,6 +81,9 @@ static void ReadIcebergManifestEntryFromAvro(avro_value_t * record, IcebergManif
 											 ManifestReaderContext * context);
 static HTAB *CreateManifestPartitionFieldMap(AvroReader * manifestReader);
 static IcebergScalarAvroType IcebergAvroTypeFromString(const char *physicalTypeName, const char *logicalTypeName);
+static avro_schema_t ManifestRecordFieldSchema(avro_schema_t parent, const char *fieldName);
+static PartitionFieldIdMapEntry * ReferencedPartitionField(avro_schema_t partitionSchema,
+														   const char *fieldName, HTAB *partitionFieldMap);
 
 
 /*
@@ -190,9 +194,26 @@ ReadIcebergManifestFromAvro(avro_value_t * record, IcebergManifest * manifest, v
 	AvroGetStringField(record, "manifest_path", AVRO_FIELD_REQUIRED, &manifest->manifest_path, &manifest->manifest_path_length);
 	AvroGetInt64Field(record, "manifest_length", AVRO_FIELD_REQUIRED, &manifest->manifest_length);
 	AvroGetInt32Field(record, "partition_spec_id", AVRO_FIELD_REQUIRED, &manifest->partition_spec_id);
-	AvroGetInt32Field(record, "content", AVRO_FIELD_REQUIRED, (int32_t *) &manifest->content);
-	AvroGetInt64Field(record, "sequence_number", AVRO_FIELD_REQUIRED, &manifest->sequence_number);
-	AvroGetInt64Field(record, "min_sequence_number", AVRO_FIELD_REQUIRED, &manifest->min_sequence_number);
+	/* v1 manifest lists have neither content nor sequence numbers. */
+	avro_value_t versionField;
+	bool		isV2 = avro_value_get_by_name(record, "content", &versionField, NULL) == 0 ||
+		avro_value_get_by_name(record, "sequence_number", &versionField, NULL) == 0;
+	AvroFieldRequired v2Required = isV2 ? AVRO_FIELD_REQUIRED : AVRO_FIELD_OPTIONAL;
+
+	if (isV2 && (!AvroFieldExists(record, "content") ||
+				 !AvroFieldExists(record, "sequence_number") ||
+				 !AvroFieldExists(record, "min_sequence_number")))
+		ereport(ERROR, (errmsg("missing or NULL required field in v2 manifest list")));
+
+	AvroGetInt32Field(record, "content", v2Required, (int32_t *) &manifest->content);
+	if (manifest->content != ICEBERG_MANIFEST_FILE_CONTENT_DATA &&
+		manifest->content != ICEBERG_MANIFEST_FILE_CONTENT_DELETES)
+		ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+						errmsg("invalid Iceberg manifest content %d", manifest->content)));
+	AvroGetInt64Field(record, "sequence_number", v2Required, &manifest->sequence_number);
+	AvroGetInt64Field(record, "min_sequence_number", v2Required, &manifest->min_sequence_number);
+	if (manifest->sequence_number < 0)
+		ereport(ERROR, (errmsg("invalid Iceberg manifest sequence number in %s", manifest->manifest_path)));
 	AvroGetInt64Field(record, "added_snapshot_id", AVRO_FIELD_REQUIRED, &manifest->added_snapshot_id);
 
 	/* Reference implementation uses data_files, spec says files */
@@ -243,11 +264,22 @@ static void
 ReadIcebergManifestEntryFromAvro(avro_value_t * record, IcebergManifestEntry * entry, ManifestReaderContext * context)
 {
 	memset(entry, '\0', sizeof(IcebergManifestEntry));
+	if (!AvroFieldExists(record, "status") || !AvroFieldExists(record, "data_file"))
+		ereport(ERROR, (errmsg("missing or NULL required field in Iceberg manifest entry")));
 	AvroGetInt32Field(record, "status", AVRO_FIELD_REQUIRED, (int32_t *) &entry->status);
 	AvroGetNullableInt64Field(record, "snapshot_id", AVRO_FIELD_OPTIONAL,
 							  &entry->snapshot_id, &entry->has_snapshot_id);
 	AvroGetNullableInt64Field(record, "sequence_number", AVRO_FIELD_OPTIONAL,
 							  &entry->sequence_number, &entry->has_sequence_number);
+	/* A v1 manifest in a v2 table has a data sequence number of zero. */
+	avro_value_t sequenceField;
+
+	context->isV1Manifest = avro_value_get_by_name(record, "sequence_number", &sequenceField, NULL) != 0;
+	if (context->isV1Manifest)
+	{
+		entry->sequence_number = 0;
+		entry->has_sequence_number = true;
+	}
 	AvroGetNullableInt64Field(record, "file_sequence_number", AVRO_FIELD_OPTIONAL,
 							  &entry->file_sequence_number, &entry->has_file_sequence_number);
 	AvroGetRecordField(record, "data_file", AVRO_FIELD_REQUIRED, (AvroParseFunction) ReadDataFileFromAvro, &entry->data_file, context);
@@ -258,7 +290,19 @@ static void
 ReadDataFileFromAvro(avro_value_t * record, DataFile * dataFile, ManifestReaderContext * context)
 {
 	memset(dataFile, '\0', sizeof(DataFile));
-	AvroGetInt32Field(record, "content", AVRO_FIELD_REQUIRED, (int32_t *) &dataFile->content);
+	avro_value_t contentField;
+
+	if (context->isV1Manifest && avro_value_get_by_name(record, "content", &contentField, NULL) == 0)
+		ereport(ERROR, (errmsg("missing sequence_number field in v2 manifest")));
+	if (!context->isV1Manifest && !AvroFieldExists(record, "content"))
+		ereport(ERROR, (errmsg("missing or NULL content field in v2 manifest")));
+	AvroGetInt32Field(record, "content", context->isV1Manifest ? AVRO_FIELD_OPTIONAL : AVRO_FIELD_REQUIRED,
+					  (int32_t *) &dataFile->content);
+	if (dataFile->content != ICEBERG_DATA_FILE_CONTENT_DATA &&
+		dataFile->content != ICEBERG_DATA_FILE_CONTENT_POSITION_DELETES &&
+		dataFile->content != ICEBERG_DATA_FILE_CONTENT_EQUALITY_DELETES)
+		ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+						errmsg("invalid Iceberg data file content %d", dataFile->content)));
 	AvroGetStringField(record, "file_path", AVRO_FIELD_REQUIRED, &dataFile->file_path, &dataFile->file_path_length);
 
 	ValidateStorageURL(dataFile->file_path);
@@ -409,11 +453,14 @@ IcebergAvroTypeFromString(const char *physicalTypeName, const char *logicalTypeN
 		{
 			type.logical_type = ICEBERG_AVRO_LOGICAL_TYPE_NONE;
 		}
-		else if (strcmp(logicalTypeName, "timestamp") == 0)
+		else if ((strcmp(logicalTypeName, "timestamp") == 0 ||
+				  strcmp(logicalTypeName, "timestamp-micros") == 0 ||
+				  strcmp(logicalTypeName, "local-timestamp-micros") == 0))
 		{
 			type.logical_type = ICEBERG_AVRO_LOGICAL_TYPE_TIMESTAMP;
 		}
-		else if (strcmp(logicalTypeName, "time") == 0)
+		else if ((strcmp(logicalTypeName, "time") == 0 ||
+				  strcmp(logicalTypeName, "time-micros") == 0))
 		{
 			type.logical_type = ICEBERG_AVRO_LOGICAL_TYPE_TIME;
 		}
@@ -423,7 +470,7 @@ IcebergAvroTypeFromString(const char *physicalTypeName, const char *logicalTypeN
 		type.physical_type = ICEBERG_AVRO_PHYSICAL_TYPE_STRING;
 		type.logical_type = ICEBERG_AVRO_LOGICAL_TYPE_NONE;
 	}
-	else if (strcmp(physicalTypeName, "bytes") == 0)
+	else if (strcmp(physicalTypeName, "bytes") == 0 || strcmp(physicalTypeName, "fixed") == 0)
 	{
 		type.physical_type = ICEBERG_AVRO_PHYSICAL_TYPE_BINARY;
 
@@ -456,6 +503,16 @@ IcebergAvroTypeFromString(const char *physicalTypeName, const char *logicalTypeN
 		type.logical_type = ICEBERG_AVRO_LOGICAL_TYPE_NONE;
 	}
 
+	if (strcmp(physicalTypeName, "int") != 0 && strcmp(physicalTypeName, "long") != 0 &&
+		strcmp(physicalTypeName, "string") != 0 && strcmp(physicalTypeName, "bytes") != 0 &&
+		strcmp(physicalTypeName, "fixed") != 0 &&
+		strcmp(physicalTypeName, "float") != 0 && strcmp(physicalTypeName, "double") != 0 &&
+		strcmp(physicalTypeName, "boolean") != 0)
+		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						errmsg("unsupported Iceberg partition physical type %s", physicalTypeName)));
+	if (logicalTypeName != NULL && type.logical_type == ICEBERG_AVRO_LOGICAL_TYPE_NONE)
+		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						errmsg("unsupported Iceberg partition logical type %s", logicalTypeName)));
 	return type;
 }
 
@@ -508,8 +565,9 @@ CreateManifestPartitionFieldMap(AvroReader * manifestReader)
 
 	/* 6) Finally unnest the partition's fields array */
 												 "partition_fields_unrolled AS ( "
-												 " SELECT jsonb_array_elements(partition_fields) AS part_field "
-												 " FROM partition_obj"
+												 " SELECT part_field, field_index "
+												 " FROM partition_obj, jsonb_array_elements(partition_fields) "
+												 " WITH ORDINALITY AS fields(part_field, field_index)"
 												 ") "
 
 	/*
@@ -529,7 +587,13 @@ CreateManifestPartitionFieldMap(AvroReader * manifestReader)
 												 "	      ELSE part_field->'type'->1->>'type' "
 												 "       END                                   AS partition_field_physical_type,"
 												 "       part_field->'type'->1->>'logicalType' AS partition_field_logical_type "
-												 "FROM partition_fields_unrolled;");
+												 "       , part_field->'type'->1->>'precision' AS precision"
+												 "       , part_field->'type'->1->>'scale' AS scale "
+												 "FROM partition_fields_unrolled ORDER BY field_index;");
+
+	/* References must follow their definitions, as in the Avro schema. */
+	avro_schema_t dataFileSchema = ManifestRecordFieldSchema(manifestReader->dataSchema, "data_file");
+	avro_schema_t partitionSchema = ManifestRecordFieldSchema(dataFileSchema, "partition");
 
 	MemoryContext currentContext = CurrentMemoryContext;
 
@@ -651,10 +715,33 @@ CreateManifestPartitionFieldMap(AvroReader * manifestReader)
 
 		PartitionFieldIdMapEntry *entry = hash_search(partitionFieldMap, fieldName, HASH_ENTER, &fieldFound);
 
-		Assert(!fieldFound);
+		if (fieldFound)
+			ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+							errmsg("duplicate partition field name %s", fieldName)));
 
 		entry->fieldId = atoi(fieldId);
+		PartitionFieldIdMapEntry *referencedField =
+			ReferencedPartitionField(partitionSchema, fieldName, partitionFieldMap);
+
+		if (referencedField != NULL)
+		{
+			/* Keep the definition's logical type, precision and scale too. */
+			entry->fieldType = referencedField->fieldType;
+			MemoryContextSwitchTo(spiContext);
+			continue;
+		}
 		entry->fieldType = IcebergAvroTypeFromString(physicalTypeName, logicalTypeName);
+		if (entry->fieldType.logical_type == ICEBERG_AVRO_LOGICAL_TYPE_DECIMAL)
+		{
+			Datum		precision = GET_SPI_DATUM(rowIndex, 5, &isNull);
+
+			if (isNull)
+				ereport(ERROR, (errmsg("missing partition decimal precision")));
+			entry->fieldType.precision = atoi(TextDatumGetCString(precision));
+			Datum		scale = GET_SPI_DATUM(rowIndex, 6, &isNull);
+
+			entry->fieldType.scale = isNull ? 0 : atoi(TextDatumGetCString(scale));
+		}
 
 		MemoryContextSwitchTo(spiContext);
 	}
@@ -662,6 +749,61 @@ CreateManifestPartitionFieldMap(AvroReader * manifestReader)
 	SPI_END();
 
 	return partitionFieldMap;
+}
+
+
+/* libavro's schema getters assume that the record and field exist. */
+static avro_schema_t
+ManifestRecordFieldSchema(avro_schema_t parent, const char *fieldName)
+{
+	int			fieldIndex = is_avro_record(parent) ?
+		avro_schema_record_field_get_index(parent, fieldName) : -1;
+
+	if (fieldIndex < 0)
+		ereport(ERROR, (errmsg("missing Iceberg manifest record field %s", fieldName)));
+	avro_schema_t schema = avro_schema_record_field_get_by_index(parent, fieldIndex);
+
+	if (!is_avro_record(schema))
+		ereport(ERROR, (errmsg("Iceberg manifest field %s must be a record", fieldName)));
+	return schema;
+}
+
+
+/*
+ * Reuse the type of the earlier partition field defining a named fixed type.
+ * Avro resolves names and namespaces for us; pointer identity avoids matching
+ * unrelated definitions with the same short name.
+ */
+static PartitionFieldIdMapEntry *
+ReferencedPartitionField(avro_schema_t partitionSchema, const char *fieldName,
+						 HTAB *partitionFieldMap)
+{
+	int			fieldIndex = avro_schema_record_field_get_index(partitionSchema, fieldName);
+
+	if (fieldIndex < 0)
+		ereport(ERROR, (errmsg("missing Iceberg partition field %s", fieldName)));
+	avro_schema_t fieldSchema = avro_schema_record_field_get_by_index(partitionSchema, fieldIndex);
+	avro_schema_t fieldType = is_avro_union(fieldSchema) ?
+		avro_schema_union_branch(fieldSchema, 1) : fieldSchema;
+
+	if (!is_avro_link(fieldType))
+		return NULL;
+	avro_schema_t target = avro_schema_link_target(fieldType);
+
+	for (size_t i = 0; i < avro_schema_record_size(partitionSchema); i++)
+	{
+		avro_schema_t candidate = avro_schema_record_field_get_by_index(partitionSchema, i);
+
+		if (is_avro_union(candidate))
+			candidate = avro_schema_union_branch(candidate, 1);
+		if (candidate == target)
+		{
+			const char *name = avro_schema_record_field_name(partitionSchema, i);
+
+			return hash_search(partitionFieldMap, name, HASH_FIND, NULL);
+		}
+	}
+	return NULL;
 }
 
 

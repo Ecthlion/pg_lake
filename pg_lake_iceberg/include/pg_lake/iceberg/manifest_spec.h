@@ -243,4 +243,5 @@ extern List *ReadIcebergManifests(const char *manifestListPath);
 extern PGDLLEXPORT List *ReadManifestEntries(const char *manifestPath);
 
 extern PGDLLEXPORT void WriteIcebergManifestList(const char *manifestListPath, List *manifests);
-extern PGDLLEXPORT void WriteIcebergManifest(const char *manifestPath, List *manifestEntries);
+extern PGDLLEXPORT void WriteIcebergManifest(const char *manifestPath, List *manifestEntries,
+											 List *metadataEntries);

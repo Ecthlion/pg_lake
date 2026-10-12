@@ -572,6 +572,7 @@ CreateManifestPartitionFieldMap(AvroReader * manifestReader)
 												 "), partition_field_types AS ( "
 												 " SELECT part_field, field_index, "
 												 " CASE WHEN part_field->'type'->>0 = 'null' "
+												 " OR part_field->'type'->0->>'type' = 'null' "
 												 " THEN part_field->'type'->1 ELSE part_field->'type'->0 END AS field_type "
 												 " FROM partition_fields_unrolled "
 												 ") "

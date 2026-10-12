@@ -170,6 +170,7 @@ class DeleteTable:
         physical_names=None,
         partition_order=None,
         partition_null_first=True,
+        partition_null_as_object=False,
         file_sequence=99,
         file_format="PARQUET",
         lower_bound=None,
@@ -227,10 +228,11 @@ class DeleteTable:
         partition_fields = self.specs[spec]
         if partition_order is not None:
             partition_fields = [partition_fields[i] for i in partition_order]
+        null_type = {"type": "null"} if partition_null_as_object else "null"
         partition_schema = avro_record(
             "partition",
             [
-                (f[2], ["null", f[4]] if partition_null_first else [f[4], "null"])
+                (f[2], [null_type, f[4]] if partition_null_first else [f[4], null_type])
                 for f in partition_fields
             ],
         )
@@ -714,8 +716,17 @@ def test_partition_identity(
 @pytest.mark.parametrize("with_delete", [False, True])
 @pytest.mark.parametrize("qualified_name", [False, True])
 @pytest.mark.parametrize("null_first", [True, False])
+@pytest.mark.parametrize("null_as_object", [False, True])
 def test_named_partition_types(
-    s3, pg_conn, extension, tmp_path, kind, with_delete, qualified_name, null_first
+    s3,
+    pg_conn,
+    extension,
+    tmp_path,
+    kind,
+    with_delete,
+    qualified_name,
+    null_first,
+    null_as_object,
 ):
     definition = {"type": "fixed", "name": "partition_key"}
     reference = "partition_key"
@@ -746,6 +757,7 @@ def test_named_partition_types(
             [row],
             partition={1000: row[4], 1001: row[5]},
             partition_null_first=null_first,
+            partition_null_as_object=null_as_object,
         )
     if with_delete:
         table.add(
@@ -755,6 +767,7 @@ def test_named_partition_types(
             equality_ids=[1],
             partition={1000: first, 1001: first},
             partition_null_first=null_first,
+            partition_null_as_object=null_as_object,
         )
     attach(pg_conn, table)
     expected = rows[1:] if with_delete else rows
@@ -763,6 +776,38 @@ def test_named_partition_types(
             (*row[:4], *(str(uuid.UUID(bytes=v)) for v in row[4:])) for row in expected
         ]
     assert_paths(pg_conn, expected)
+    pg_conn.rollback()
+
+
+@pytest.mark.parametrize("with_delete", [False, True])
+@pytest.mark.parametrize("null_first", [True, False])
+@pytest.mark.parametrize("null_as_object", [False, True])
+def test_nullable_primitive_partition_type(
+    s3, pg_conn, extension, tmp_path, with_delete, null_first, null_as_object
+):
+    table = DeleteTable(
+        tmp_path,
+        s3,
+        fields=FIELDS + [(5, "p", "int")],
+        specs={0: [(5, 1000, "p_identity", "identity", "int")]},
+    )
+    rows = [(1, "x", "value", 1, 7), (1, "x", "null", 1, None)]
+    options = dict(
+        partition_null_first=null_first, partition_null_as_object=null_as_object
+    )
+    for row in rows:
+        table.add([row], partition={1000: row[4]}, **options)
+    if with_delete:
+        table.add(
+            [(1,)],
+            content=2,
+            sequence=2,
+            equality_ids=[1],
+            partition={1000: 7},
+            **options,
+        )
+    attach(pg_conn, table)
+    assert_paths(pg_conn, rows[1:] if with_delete else rows)
     pg_conn.rollback()
 
 
@@ -1959,7 +2004,11 @@ def test_bounds_pruning_is_per_data_file(s3, pg_conn, extension, delete_table):
     assert_paths(pg_conn, [low_rows[1], high_rows[1]], data_files=2, delete_files=2)
 
 
-def test_disjoint_bounds_skip_unreadable_delete(s3, pg_conn, extension, delete_table):
+@pytest.mark.parametrize("pushdown", [True, False])
+@pytest.mark.parametrize("inherited", [True, False])
+def test_disjoint_bounds_skip_unreadable_delete(
+    s3, pg_conn, extension, delete_table, with_default_location, pushdown, inherited
+):
     rows = [(10, "x", "keep", 1)]
     delete_table.add(rows, metrics=integer_metrics(1, 10, 10))
     path = delete_table.add(
@@ -1970,6 +2019,14 @@ def test_disjoint_bounds_skip_unreadable_delete(s3, pg_conn, extension, delete_t
         metrics=integer_metrics(1, 20, 20),
     )
     attach(pg_conn, delete_table)
+    relation = "equality_test"
+    if inherited:
+        run_command(
+            "CREATE TABLE equality_parent (LIKE equality_test) USING iceberg;"
+            "ALTER TABLE equality_test INHERIT equality_parent",
+            pg_conn,
+        )
+        relation = "equality_parent"
     delete_table.s3.delete_object(
         Bucket=TEST_BUCKET, Key=f"{delete_table.prefix}/{path.name}"
     )
@@ -1978,7 +2035,25 @@ def test_disjoint_bounds_skip_unreadable_delete(s3, pg_conn, extension, delete_t
         == "on"
     )
     # Retained data is readable; the pruned delete cannot even supply a footer.
-    assert_paths(pg_conn, rows, data_files=1, delete_files=0)
+    run_command(
+        f"SET LOCAL pg_lake_table.enable_full_query_pushdown={str(pushdown).lower()}",
+        pg_conn,
+    )
+    query = f"SELECT * FROM {relation}"
+    plan = run_query(f"EXPLAIN (VERBOSE, FORMAT JSON) {query}", pg_conn)
+    if not inherited:
+        assert int(fetch_data_files_used(plan)) == 1
+        assert int(fetch_delete_files_used(plan)) == 0
+    pending = [plan[0][0][0]["Plan"]]
+    scans = []
+    while pending:
+        node = pending.pop()
+        if node["Node Type"] in ("Custom Scan", "Foreign Scan"):
+            scans.append(node)
+        pending.extend(node.get("Plans", []))
+    assert scans and all(scan.get("Plans") for scan in scans)
+    assert bag(pg_conn, query) == row_bag(rows)
+    pg_conn.rollback()
 
 
 @pytest.mark.parametrize("pushdown", [True, False])

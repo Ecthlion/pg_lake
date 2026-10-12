@@ -803,7 +803,7 @@ PlanIcebergEqualityDeletes(IcebergTableMetadata * metadata, List *dataFiles,
 static bool
 TableScanHasEqualityDeletes(PgLakeTableScan * tableScan)
 {
-	if (tableScan->equalityDeleteReadGroups != NIL)
+	if (tableScan->equalityDeleteScans != NIL)
 		return true;
 
 	foreach_ptr(PgLakeTableScan, childScan, tableScan->childScans)
@@ -817,7 +817,7 @@ TableScanHasEqualityDeletes(PgLakeTableScan * tableScan)
 
 /*
  * SnapshotHasEqualityDeletes returns whether any table or inherited child
- * in the snapshot has planned equality delete read groups.
+ * in the snapshot has retained equality delete files.
  */
 bool
 SnapshotHasEqualityDeletes(PgLakeScanSnapshot * snapshot)

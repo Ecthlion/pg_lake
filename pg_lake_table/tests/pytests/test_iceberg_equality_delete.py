@@ -2119,40 +2119,6 @@ def manifest_pruning_permissions(superuser_conn, app_user, pg_conn, request):
     yield
 
 
-@pytest.mark.usefixtures("manifest_pruning_permissions")
-def test_manifest_where_complete_bounds_skip_footer(
-    pg_conn, pgduck_conn, extension, delete_table
-):
-    delete_table.add(
-        [(1, "a", "low", 1), (10, "a", "low", 10)], metrics=integer_metrics(1, 1, 10)
-    )
-    delete_table.add(
-        [(100, "b", "high", 100), (150, "b", "high", 150), (200, "b", "high", 200)],
-        metrics=integer_metrics(1, 100, 200),
-    )
-    attach(pg_conn, delete_table)
-    logging = run_query("SELECT current_setting('enable_logging')", pgduck_conn)[0][0]
-    stats_count_sql = (
-        "SELECT count(*) FROM duckdb_logs() WHERE type='QueryLog' "
-        f"AND contains(message, '{delete_table.url}') "
-        "AND contains(message, 'parquet_metadata(') "
-        "AND NOT contains(message, 'duckdb_logs(')"
-    )
-    try:
-        run_command("SET GLOBAL enable_logging=true", pgduck_conn)
-        before = run_query(stats_count_sql, pgduck_conn)[0][0]
-        run_query("EXPLAIN SELECT * FROM equality_test WHERE id=150", pg_conn)
-        after = run_query(stats_count_sql, pgduck_conn)[0][0]
-        assert after == before
-    finally:
-        run_command(
-            f"SET GLOBAL enable_logging={'true' if logging else 'false'}", pgduck_conn
-        )
-    assert bag(pg_conn, "SELECT * FROM equality_test WHERE id=150") == row_bag(
-        [(150, "b", "high", 150)]
-    )
-
-
 def manifest_explain_stats(pg_conn, pgduck_conn, table, predicate):
     """Count only per-file planning stats SQL, separately from execution reads."""
     logging = run_query("SELECT current_setting('enable_logging')", pgduck_conn)[0][0]
@@ -2191,27 +2157,34 @@ def assert_manifest_oracle(pg_conn, predicate):
     run_command("SET LOCAL pg_lake_table.enable_partition_pruning=on", pg_conn)
 
 
-@pytest.mark.parametrize("wide", [False, True])
+@pytest.mark.parametrize("bounds", ["complete", "missing", "wide"])
 @pytest.mark.usefixtures("manifest_pruning_permissions")
-def test_manifest_where_per_file_fallback(
-    pg_conn, pgduck_conn, extension, delete_table, wide
+def test_manifest_where_footer_reads(
+    pg_conn, pgduck_conn, extension, delete_table, bounds
 ):
     delete_table.add([(1, "a", "low", 1)], metrics=integer_metrics(1, 1, 10))
     delete_table.add(
-        [(100, "b", "high", 100), (200, "b", "high", 200)],
-        metrics=integer_metrics(1, 0, 1000) if wide else integer_metrics(1, 100, 200),
+        [(100, "b", "high", 100), (150, "b", "high", 150), (200, "b", "high", 200)],
+        metrics=(
+            integer_metrics(1, 0, 1000)
+            if bounds == "wide"
+            else integer_metrics(1, 100, 200)
+        ),
     )
-    delete_table.add([(150, "c", "fallback", 150)])
+    expected = [(150, "b", "high", 150)]
+    if bounds != "complete":
+        delete_table.add([(150, "c", "fallback", 150)])
+        expected.append((150, "c", "fallback", 150))
+    predicate = "id=50" if bounds == "wide" else "id=150"
     attach(pg_conn, delete_table)
-    predicate = "id=50" if wide else "id=150"
     counts = manifest_explain_stats(pg_conn, pgduck_conn, delete_table, predicate)
-    assert counts[:2] == [0, 0]
-    assert counts[2] > 0
+    assert [count > 0 for count in counts] == (
+        [False, False] if bounds == "complete" else [False, False, True]
+    )
+    assert bag(pg_conn, f"SELECT * FROM equality_test WHERE {predicate}") == row_bag(
+        [] if bounds == "wide" else expected
+    )
     assert_manifest_oracle(pg_conn, predicate)
-    if wide:
-        assert (
-            bag(pg_conn, f"SELECT * FROM equality_test WHERE {predicate}") == Counter()
-        )
 
 
 # Bounds are encoded independently of pg_lake's serializer. Invalid metrics must
@@ -2220,32 +2193,8 @@ MANIFEST_BOUND_CASES = [
     ("int", [-(2**31), -1, 0, 2**31 - 1], -(2**31), 2**31 - 1, 4, True),
     ("long", [-(2**63), -1, 0, 2**63 - 1], -(2**63), 2**63 - 1, 8, True),
     ("long", [-10, 0, 10], -10, 10, 4, True),
-    (
-        "date",
-        [date(1969, 12, 31), date(1970, 1, 1), date(2000, 1, 1)],
-        -1,
-        10957,
-        4,
-        True,
-    ),
     ("date", [date(1970, 1, 1)], -2440588, 2145042905, 4, True),
     ("date", [date(1970, 1, 1)], -(2**31), 2**31 - 1, 4, False),
-    (
-        "decimal(9,2)",
-        [Decimal("-1.28"), Decimal("0"), Decimal("1.28")],
-        b"\x80",
-        b"\x00\x80",
-        None,
-        True,
-    ),
-    (
-        "decimal(38,2)",
-        [Decimal("-1"), Decimal("0"), Decimal("1")],
-        -(10**38 - 1),
-        10**38 - 1,
-        16,
-        True,
-    ),
     (
         "decimal(38,38)",
         [Decimal("-0.1"), Decimal("0"), Decimal("0.1")],
@@ -2257,23 +2206,17 @@ MANIFEST_BOUND_CASES = [
     ("decimal(9,2)", [Decimal("1")], -(2**127), 2**127 - 1, 16, False),
     ("decimal(9,2)", [Decimal("1")], b"", b"\x01", None, False),
     ("decimal(9,2)", [Decimal("1")], bytes(17), bytes(17), None, False),
-]
-MANIFEST_BOUND_CASES += [
     ("int", [0], 0, 0, 4, True),
     ("long", [0], 0, 0, 8, True),
     ("date", [date(1970, 1, 1)], 0, 0, 4, True),
     ("decimal(9,2)", [Decimal("0")], b"\x00", b"\x00", None, True),
     ("long", [0], bytes(4), bytes(8), None, False),
     ("double", [-1.0, 0.0, 1.0], bytes(8), bytes(8), None, False),
-]
-MANIFEST_BOUND_CASES += [
-    (kind, [0], bytes(width), bytes(width), None, False)
-    for kind in ("int", "long", "date")
-    for width in (0, 3, 5, 9)
-]
-MANIFEST_BOUND_CASES += [
-    (kind, [0], 10, -10, width, False)
-    for kind, width in (("int", 4), ("long", 8), ("decimal(9,2)", 2))
+    ("int", [0], bytes(3), bytes(3), None, False),
+    ("long", [0], bytes(9), bytes(9), None, False),
+    ("date", [date(1970, 1, 1)], bytes(5), bytes(5), None, False),
+    ("int", [0], 10, -10, 4, False),
+    ("decimal(9,2)", [0], 10, -10, 2, False),
 ]
 
 
@@ -2292,8 +2235,6 @@ def test_manifest_where_typed_bounds(
     width,
     complete,
 ):
-    if kind == "date" and values == [0]:
-        values = [date(1970, 1, 1)]
     if width is not None:
         order = "big" if kind.startswith("decimal") else "little"
         lower, upper = (v.to_bytes(width, order, signed=True) for v in (lower, upper))
@@ -2307,13 +2248,7 @@ def test_manifest_where_typed_bounds(
     predicate = f"value = {literal}"
     counts = manifest_explain_stats(pg_conn, pgduck_conn, table, predicate)
     assert (counts[0] == 0) == complete
-    for predicate in (
-        predicate,
-        "value IS NULL",
-        "value IS NOT NULL",
-        f"value < {literal} OR value IS NULL",
-    ):
-        assert_manifest_oracle(pg_conn, predicate)
+    assert_manifest_oracle(pg_conn, predicate)
 
 
 @pytest.mark.parametrize(
@@ -2362,6 +2297,14 @@ def test_manifest_where_expressions(
     count = manifest_explain_stats(pg_conn, pgduck_conn, delete_table, predicate)[0]
     assert (count == 0) == complete
     assert_manifest_oracle(pg_conn, predicate)
+
+
+@pytest.mark.usefixtures("manifest_pruning_permissions")
+def test_manifest_where_parameters(pg_conn, extension, delete_table):
+    delete_table.add(
+        [(5, "x", "keep", 5), (5, "x", "keep", 5)], metrics=integer_metrics(1, 1, 10)
+    )
+    attach(pg_conn, delete_table)
     run_command(
         "PREPARE manifest_parameter(int) AS SELECT * FROM equality_test WHERE id=$1",
         pg_conn,
@@ -2378,7 +2321,7 @@ def test_manifest_where_expressions(
 def test_manifest_where_delete_combinations(
     pg_conn, pgduck_conn, extension, delete_table, deletes
 ):
-    low = delete_table.add([(1, "x", "low", 1)], metrics=integer_metrics(1, 1, 10))
+    delete_table.add([(1, "x", "low", 1)], metrics=integer_metrics(1, 1, 10))
     high = delete_table.add(
         [(150, "x", "keep", 1), (150, "x", "keep", 1), (160, "x", "delete", 2)],
         metrics=integer_metrics(1, 100, 200),

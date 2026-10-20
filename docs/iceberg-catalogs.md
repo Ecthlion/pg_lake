@@ -382,6 +382,25 @@ avoids this manual step. The same `lowercase_column_names` option is accepted by
 with `load_from` or `definition_from`, and by `COPY ... FROM` an Iceberg metadata file. See the
 [file formats reference](file-formats-reference.md#external-iceberg-format) for those forms.
 
+## Data file pruning for external Iceberg tables
+
+For filters on top-level `int`, `long`, `date`, and `decimal` columns, pg_lake
+uses lower and upper bounds from the scan's Iceberg manifests before requesting
+Parquet footer statistics. Files whose bounds prove that they cannot match the
+filter are excluded from the scan.
+
+When all filtered columns have usable manifest bounds, no additional footer
+statistics are requested for that file during pruning. Missing, duplicate,
+malformed, or unsupported bounds fall back to the existing footer statistics
+path unless the available constraints already exclude the file. Pruning
+preserves possible NULL matches and duplicate rows.
+
+Manifest bounds may be wider than footer bounds, so this optimization does not
+guarantee fewer retained files. Execution, or obtaining a DuckDB physical plan,
+may still read footers of retained files. The existing
+`pg_lake_table.enable_data_file_pruning` setting controls this optimization;
+internal-table pruning and whole-file matching for writes are unchanged.
+
 ## Reading external equality deletes
 
 Read-only external Iceberg v2 tables apply Parquet equality delete files as well as
@@ -417,7 +436,8 @@ pg_lake does not write equality delete files.
 Both query pushdown and Foreign Scan apply the same deletion rules, including
 when a query projects only non-key columns or uses `count(*)`. When equality
 delete files remain after pruning, plain `EXPLAIN` reports the PostgreSQL plan
-without opening the physical files; it omits the DuckDB physical plan.
+and omits the DuckDB physical plan and equality-delete footer validation.
+Data file pruning may still read footers when manifest bounds are insufficient.
 `EXPLAIN VERBOSE` also reports vectorized SQL and file counts. When all equality
 deletes are pruned, the DuckDB physical plan remains available. Queries and
 `EXPLAIN ANALYZE` validate referenced delete file footers through

@@ -868,11 +868,23 @@ TruncatePartitionFieldBoundConstraint(PartitionField * partitionField,
 		int32		partitionValue = *(int32_t *) partitionField->value;
 		int			truncateLen = partitionTransform->truncateLen;
 
+		if (pgType.postgresTypeOid == INT2OID)
+		{
+			/* int2 operators read 16 bits, so clamp the int4 partition range */
+			int64		lastValue = (int64) partitionValue + truncateLen - 1;
+
+			return CreateConstraintWithBounds(copyObject(entry->columnBoundInclusiveUpper),
+											  entry->constByVal, entry->typLen,
+											  Int16GetDatum(Max(partitionValue, PG_INT16_MIN)),
+											  Int16GetDatum(Min(lastValue, PG_INT16_MAX)));
+		}
+
 		int32		upperBound;
 
 		if (pg_add_s32_overflow(partitionValue, truncateLen, &upperBound))
 		{
-			upperBound = INT32_MAX;
+			/* also holds values near INT32_MIN whose truncation wrapped */
+			return NULL;
 		}
 
 		Datum		lowerBoundDatum = Int32GetDatum(partitionValue);
@@ -890,7 +902,8 @@ TruncatePartitionFieldBoundConstraint(PartitionField * partitionField,
 
 		if (pg_add_s64_overflow(partitionValue, truncateLen, &upperBound))
 		{
-			upperBound = INT64_MAX;
+			/* also holds values near INT64_MIN whose truncation wrapped */
+			return NULL;
 		}
 
 		Datum		lowerBoundDatum = Int64GetDatum(partitionValue);

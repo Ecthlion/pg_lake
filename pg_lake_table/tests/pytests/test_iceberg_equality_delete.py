@@ -1880,6 +1880,8 @@ def test_integer_bounds_reject_null_metric_value(
     "data_value,delete_value,data_width,delete_width,mixed_width",
     [
         pytest.param(-10, 20, 4, 8, None, id="promoted-data"),
+        pytest.param(-10, -10, 4, 8, None, id="promoted-data-overlap"),
+        pytest.param(-10, -10, 8, 4, None, id="promoted-delete-overlap"),
         pytest.param(-(2**40), 20, 8, 4, None, id="promoted-delete"),
         pytest.param(-(2**63), 2**63 - 1, 8, 8, None, id="long-extrema"),
         pytest.param(-(2**31), 2**31 - 1, 4, 4, None, id="int-extrema"),
@@ -1935,7 +1937,13 @@ def test_long_bounds_pruning(
             )
         )
     attach(pg_conn, delete_table)
-    assert_paths(pg_conn, rows, data_files=1, delete_files=int(mixed_width is not None))
+    overlap = data_value == delete_value
+    assert_paths(
+        pg_conn,
+        [] if overlap else rows,
+        data_files=1,
+        delete_files=int(overlap or mixed_width is not None),
+    )
 
 
 @pytest.mark.parametrize("keys", ["added", "composite", "string"])

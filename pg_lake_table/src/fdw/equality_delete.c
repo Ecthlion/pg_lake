@@ -23,7 +23,7 @@
 #include "catalog/pg_type_d.h"
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "nodes/bitmapset.h"
-#include "port/pg_bswap.h"
+#include "pg_lake/iceberg/data_file_stats.h"
 #include "pg_extension_base/pg_compat.h"
 #include "pg_lake/fdw/equality_delete.h"
 #include "pg_lake/fdw/partition_transform.h"
@@ -81,7 +81,6 @@ static bool AvroTypesEqual(IcebergScalarAvroType left, IcebergScalarAvroType rig
 static DataFileSchema * EqualityKeySchema(IcebergTableMetadata * metadata, DataFile * file);
 static bool KeySchemasEqual(DataFileSchema * left, DataFileSchema * right);
 static void AddCandidates(Bitmapset **mask, List *candidates, DataFile * dataFile);
-static bool ReadIntegerBound(ColumnBound * bounds, size_t count, int id, bool isLong, int64 *value, size_t *width);
 static bool IntegerBoundsDisjoint(DataFile * dataFile, EqualityDeleteFile * deletion);
 static void ValidateEqualityDeletesForTableScan(PgLakeTableScan * tableScan);
 static bool TableScanHasEqualityDeletes(PgLakeTableScan * tableScan);
@@ -524,52 +523,6 @@ AddCandidates(Bitmapset **mask, List *candidates, DataFile * dataFile)
 	}
 }
 
-/* Missing, ambiguous or invalid metrics cannot prove that a delete is irrelevant. */
-static bool
-ReadIntegerBound(ColumnBound * bounds, size_t count, int id, bool isLong, int64 *value, size_t *width)
-{
-	ColumnBound *match = NULL;
-
-	for (size_t i = 0; i < count; i++)
-	{
-		if (bounds[i].column_id != id)
-			continue;
-		if (match != NULL)
-			return false;
-		match = &bounds[i];
-	}
-	if (match == NULL || match->value == NULL)
-		return false;
-
-	/* Iceberg bounds are little-endian; memcpy avoids alignment assumptions. */
-	if (match->value_length == sizeof(int32))
-	{
-		uint32		encoded;
-
-		memcpy(&encoded, match->value, sizeof(encoded));
-#ifdef WORDS_BIGENDIAN
-		encoded = pg_bswap32(encoded);
-#endif
-		*value = (int32) encoded;
-		*width = sizeof(encoded);
-		return true;
-	}
-	/* A promoted long may still carry four-byte int bounds in an older file. */
-	if (isLong && match->value_length == sizeof(int64))
-	{
-		uint64		encoded;
-
-		memcpy(&encoded, match->value, sizeof(encoded));
-#ifdef WORDS_BIGENDIAN
-		encoded = pg_bswap64(encoded);
-#endif
-		*value = (int64) encoded;
-		*width = sizeof(encoded);
-		return true;
-	}
-	return false;
-}
-
 /*
  * One disjoint component proves a composite equality key cannot match.
  * Bounds omit NULLs, so require an explicit zero delete null count for that
@@ -605,27 +558,23 @@ IntegerBoundsDisjoint(DataFile * dataFile, EqualityDeleteFile * deletion)
 		if (nullStats != 1 || !noDeleteNulls)
 			continue;
 
-		int64		dataLower,
-					dataUpper,
-					deleteLower,
-					deleteUpper;
-		size_t		dataLowerWidth,
-					dataUpperWidth,
-					deleteLowerWidth,
-					deleteUpperWidth;
+		PGType		pgType = MakePGTypeOid(isLong ? INT8OID : INT4OID);
+		Datum		dataLowerValue,
+					dataUpperValue,
+					deleteLowerValue,
+					deleteUpperValue;
 
-		if (!ReadIntegerBound(dataFile->lower_bounds, dataFile->lower_bounds_length,
-							  key->id, isLong, &dataLower, &dataLowerWidth) ||
-			!ReadIntegerBound(dataFile->upper_bounds, dataFile->upper_bounds_length,
-							  key->id, isLong, &dataUpper, &dataUpperWidth) ||
-			!ReadIntegerBound(deleteFile->lower_bounds, deleteFile->lower_bounds_length,
-							  key->id, isLong, &deleteLower, &deleteLowerWidth) ||
-			!ReadIntegerBound(deleteFile->upper_bounds, deleteFile->upper_bounds_length,
-							  key->id, isLong, &deleteUpper, &deleteUpperWidth))
+		if (!GetIcebergColumnBounds(dataFile, key->id, key->type, pgType,
+									&dataLowerValue, &dataUpperValue) ||
+			!GetIcebergColumnBounds(deleteFile, key->id, key->type, pgType,
+									&deleteLowerValue, &deleteUpperValue))
 			continue;
-		if (dataLowerWidth != dataUpperWidth || deleteLowerWidth != deleteUpperWidth ||
-			dataLower > dataUpper || deleteLower > deleteUpper)
-			continue;
+
+		int64		dataLower = isLong ? DatumGetInt64(dataLowerValue) : DatumGetInt32(dataLowerValue);
+		int64		dataUpper = isLong ? DatumGetInt64(dataUpperValue) : DatumGetInt32(dataUpperValue);
+		int64		deleteLower = isLong ? DatumGetInt64(deleteLowerValue) : DatumGetInt32(deleteLowerValue);
+		int64		deleteUpper = isLong ? DatumGetInt64(deleteUpperValue) : DatumGetInt32(deleteUpperValue);
+
 		if (dataUpper < deleteLower || deleteUpper < dataLower)
 			return true;
 	}

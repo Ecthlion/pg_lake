@@ -244,8 +244,10 @@ GetExplainJson(char *query, int numParams, const char **parameterValues)
 	/* Finish the single-row query before closing its connection. */
 	result = WaitForLastResult(pgDuckConn);
 	if (result != NULL)
+	{
 		CheckPGDuckResult(pgDuckConn, result);
-	PQclear(result);
+		PQclear(result);
+	}
 
 	ReleasePGDuckConnection(pgDuckConn);
 
